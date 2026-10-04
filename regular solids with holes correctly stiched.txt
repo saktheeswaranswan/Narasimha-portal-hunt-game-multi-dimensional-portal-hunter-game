@@ -1,0 +1,730 @@
+import java.util.ArrayList;
+import java.util.HashMap;
+
+// ============================================================
+// REGULAR STITCHED MULTI-HOLE SOLID TOPOLOGY LAB
+// ============================================================
+
+// ============================================================
+// SHAPE CONSTANTS
+// ============================================================
+final int SHAPE_SPHERE = 0;
+final int SHAPE_CYLINDER = 1;
+final int SHAPE_CONE = 2;
+final int SHAPE_CUBOID = 3;
+final int SHAPE_TORUS = 4;
+
+// ============================================================
+// CURRENT SHAPE
+// ============================================================
+int currentShape = SHAPE_SPHERE;
+
+// ============================================================
+// GENERAL PARAMETERS
+// ============================================================
+float baseSize = 220.0f;
+int holeCount = 3;
+float holeRadius = 32.0f;
+int gridResolution = 42;
+
+// ============================================================
+// DISPLAY FLAGS
+// ============================================================
+boolean stitchedSurface = true;
+boolean diagnosticMode = false;
+
+// ============================================================
+// MESH
+// ============================================================
+ArrayList<PVector> meshVertices = new ArrayList<PVector>();
+ArrayList<Integer> meshTriangles = new ArrayList<Integer>();
+
+// ============================================================
+// VERTEX MAP
+// ============================================================
+HashMap<String, Integer> vertexMap = new HashMap<String, Integer>();
+
+// ============================================================
+// TOPOLOGY CACHE
+// ============================================================
+int cachedV = 0;
+int cachedE = 0;
+int cachedF = 0;
+int cachedEuler = 0;
+float cachedGenus = 0.0f;
+
+// ============================================================
+// HOLE DIRECTIONS
+// ============================================================
+final int MAX_HOLES = 24;
+PVector[] holeDir = new PVector[MAX_HOLES];
+PVector[] holeU = new PVector[MAX_HOLES];
+PVector[] holeV = new PVector[MAX_HOLES];
+
+// ============================================================
+// CAMERA
+// ============================================================
+float rotX = -0.35f;
+float rotY = 0.55f;
+float lastMouseX;
+float lastMouseY;
+boolean rotating = false;
+
+// ============================================================
+// UI
+// ============================================================
+float sliderX = 30;
+float sliderW = 260;
+float sliderHoleY = 95;
+float sliderRadiusY = 150;
+float sliderResolutionY = 205;
+boolean dragHole = false;
+boolean dragRadius = false;
+boolean dragResolution = false;
+
+// ============================================================
+// SETUP
+// ============================================================
+void setup() {
+  size( 1250, 850, P3D );
+  smooth(4); // 8x MSAA often crashes on modern GPUs in P3D
+  textFont( createFont( "SansSerif", 15 ) );
+  generateHoleDirections();
+  rebuildMesh();
+}
+
+// ============================================================
+// MAIN DRAW
+// ============================================================
+void draw() {
+  background( 5, 8, 18 );
+  lights(); // Turn on 3D lighting
+  drawObject();
+  
+  noLights(); // Critical: Turn off lighting so UI text doesn't render black!
+  drawUI();
+}
+
+// ============================================================
+// DRAW OBJECT
+// ============================================================
+void drawObject() {
+  pushMatrix();
+  translate( width * 0.66f, height * 0.57f, 0 );
+  rotateX(rotX);
+  rotateY(rotY);
+  drawMesh();
+  popMatrix();
+}
+
+// ============================================================
+// DRAW COMPLETE MESH
+// ============================================================
+void drawMesh() {
+  if ( stitchedSurface && !diagnosticMode ) {
+    stroke( 55, 190, 255, 220 );
+    fill( 45, 120, 215, 215 );
+  } else {
+    stroke( 120, 170, 215, 230 );
+    fill( 55, 90, 155, 205 );
+  }
+  
+  // Critical: Using fractional strokeWeight in P3D causes OpenGL to silently crash! 
+  strokeWeight(1.0f); 
+  
+  beginShape(TRIANGLES);
+  for ( int i = 0; i < meshTriangles.size(); i++ ) {
+    int id = meshTriangles.get(i);
+    PVector p = meshVertices.get(id);
+    vertex( p.x, p.y, p.z );
+  }
+  endShape();
+  
+  if (diagnosticMode) {
+    drawHoleAxisDiagnostics();
+  }
+}
+
+// ============================================================
+// GENERATE HOLE DIRECTIONS
+// ============================================================
+void generateHoleDirections() {
+  float goldenAngle = PI * (3.0f - sqrt(5.0f));
+  
+  for ( int i = 0; i < MAX_HOLES; i++ ) {
+    float y = 1.0f - 2.0f * (i + 0.5f) / MAX_HOLES;
+    float r = sqrt( max( 0.0f, 1.0f - y * y ) );
+    float angle = i * goldenAngle;
+    
+    PVector d = new PVector( r * cos(angle), y, r * sin(angle) );
+    d.normalize();
+    holeDir[i] = d;
+    
+    PVector reference;
+    if ( abs(d.y) < 0.85f ) {
+      reference = new PVector( 0, 1, 0 );
+    } else {
+      reference = new PVector( 1, 0, 0 );
+    }
+    
+    PVector u = d.cross(reference);
+    u.normalize();
+    PVector v = d.cross(u);
+    v.normalize();
+    
+    holeU[i] = u;
+    holeV[i] = v;
+  }
+}
+
+// ============================================================
+// BOOLEAN SOLID FIELD
+// ============================================================
+float solidField( PVector p ) {
+  float result = baseField(p);
+  for ( int h = 0; h < holeCount; h++ ) {
+    float tunnel = tunnelField( p, h );
+    result = max( result, -tunnel );
+  }
+  return result;
+}
+
+float baseField( PVector p ) {
+  if ( currentShape == SHAPE_SPHERE ) return sphereField(p);
+  if ( currentShape == SHAPE_CYLINDER ) return cylinderField(p);
+  if ( currentShape == SHAPE_CONE ) return coneField(p);
+  if ( currentShape == SHAPE_CUBOID ) return cuboidField(p);
+  if ( currentShape == SHAPE_TORUS ) return torusField(p);
+  return sphereField(p);
+}
+
+float sphereField( PVector p ) {
+  return p.mag() - baseSize;
+}
+
+float cylinderField( PVector p ) {
+  float radial = sqrt( p.x * p.x + p.z * p.z ) - baseSize;
+  float vertical = abs(p.y) - baseSize;
+  return max( radial, vertical );
+}
+
+float coneField( PVector p ) {
+  float height = baseSize * 2.0f;
+  float localY = p.y + baseSize;
+  float t = constrain( localY / height, 0.0f, 1.0f );
+  float allowedRadius = baseSize * (1.0f - t);
+  float radial = sqrt( p.x * p.x + p.z * p.z );
+  float side = radial - allowedRadius;
+  float bottom = -localY;
+  float top = localY - height;
+  return max( side, max( bottom, top ) );
+}
+
+float cuboidField( PVector p ) {
+  float dx = abs(p.x) - baseSize;
+  float dy = abs(p.y) - baseSize;
+  float dz = abs(p.z) - baseSize;
+  return max( dx, max( dy, dz ) );
+}
+
+float torusField( PVector p ) {
+  float R = baseSize * 0.62f;
+  float r = baseSize * 0.30f;
+  float radial = sqrt( p.x * p.x + p.z * p.z );
+  float q = radial - R;
+  return sqrt( q * q + p.y * p.y ) - r;
+}
+
+float tunnelField( PVector p, int h ) {
+  PVector d = holeDir[h];
+  float axial = p.dot(d);
+  PVector axisPoint = PVector.mult( d, axial );
+  PVector radial = PVector.sub( p, axisPoint );
+  return radial.mag() - holeRadius;
+}
+
+float gridMin() {
+  return -baseSize * 1.18f;
+}
+float gridMax() {
+  return baseSize * 1.18f;
+}
+
+// ============================================================
+// REBUILD MESH
+// ============================================================
+void rebuildMesh() {
+  meshVertices.clear();
+  meshTriangles.clear();
+  vertexMap.clear();
+  
+  cachedV = 0;
+  cachedE = 0;
+  cachedF = 0;
+  cachedEuler = 0;
+  cachedGenus = 0;
+  
+  marchingTetrahedra();
+  calculateTopology();
+}
+
+// ============================================================
+// MARCHING TETRAHEDRA
+// ============================================================
+void marchingTetrahedra() {
+  int N = gridResolution;
+  float minValue = gridMin();
+  float maxValue = gridMax();
+  float step = (maxValue - minValue) / N;
+  
+  for ( int ix = 0; ix < N; ix++ ) {
+    for ( int iy = 0; iy < N; iy++ ) {
+      for ( int iz = 0; iz < N; iz++ ) {
+        PVector[] p = new PVector[8];
+        float[] val = new float[8];
+        
+        for ( int c = 0; c < 8; c++ ) {
+          int dx = ((c & 1) != 0) ? 1 : 0;
+          int dy = ((c & 2) != 0) ? 1 : 0;
+          int dz = ((c & 4) != 0) ? 1 : 0;
+          p[c] = new PVector(
+            minValue + (ix + dx) * step,
+            minValue + (iy + dy) * step,
+            minValue + (iz + dz) * step
+          );
+          val[c] = solidField( p[c] );
+        }
+        
+        processTet( p, val, 0, 5, 1, 6 );
+        processTet( p, val, 0, 1, 2, 6 );
+        processTet( p, val, 0, 2, 3, 6 );
+        processTet( p, val, 0, 3, 7, 6 );
+        processTet( p, val, 0, 7, 4, 6 );
+        processTet( p, val, 0, 4, 5, 6 );
+      }
+    }
+  }
+}
+
+void processTet( PVector[] p, float[] val, int a, int b, int c, int d ) {
+  int[] ids = { a, b, c, d };
+  ArrayList<PVector> intersections = new ArrayList<PVector>();
+  
+  for ( int i = 0; i < 4; i++ ) {
+    for ( int j = i + 1; j < 4; j++ ) {
+      int ia = ids[i];
+      int ib = ids[j];
+      float va = val[ia];
+      float vb = val[ib];
+      
+      boolean crosses = ( va < 0 && vb >= 0 ) || ( va >= 0 && vb < 0 );
+      if (crosses) {
+        intersections.add( interpolate( p[ia], p[ib], va, vb ) );
+      }
+    }
+  }
+  
+  if ( intersections.size() == 3 ) {
+    addTriangle( intersections.get(0), intersections.get(1), intersections.get(2) );
+  } else if ( intersections.size() == 4 ) {
+    addTriangle( intersections.get(0), intersections.get(1), intersections.get(2) );
+    addTriangle( intersections.get(0), intersections.get(2), intersections.get(3) );
+  }
+}
+
+// ============================================================
+// INTERPOLATE SURFACE CROSSING
+// ============================================================
+PVector interpolate( PVector p1, PVector p2, float v1, float v2 ) {
+  float denominator = v1 - v2;
+  float t = 0.5f;
+  if ( abs(denominator) > 0.000001f ) {
+    t = v1 / denominator;
+    t = constrain( t, 0.0f, 1.0f );
+  }
+  
+  // Safe interpolation avoids faulty `PVector.lerp()` implementations
+  return new PVector(
+    lerp(p1.x, p2.x, t),
+    lerp(p1.y, p2.y, t),
+    lerp(p1.z, p2.z, t)
+  );
+}
+
+void addTriangle( PVector a, PVector b, PVector c ) {
+  int ia = addVertex(a);
+  int ib = addVertex(b);
+  int ic = addVertex(c);
+  
+  if ( ia == ib || ib == ic || ic == ia ) {
+    return;
+  }
+  
+  meshTriangles.add(ia);
+  meshTriangles.add(ib);
+  meshTriangles.add(ic);
+}
+
+int addVertex( PVector p ) {
+  float q = 100000.0f;
+  int x = round(p.x * q);
+  int y = round(p.y * q);
+  int z = round(p.z * q);
+  
+  String key = x + "_" + y + "_" + z;
+  Integer old = vertexMap.get(key);
+  
+  if ( old != null ) {
+    return old;
+  }
+  
+  int id = meshVertices.size();
+  meshVertices.add( p.copy() );
+  vertexMap.put( key, id );
+  return id;
+}
+
+// ============================================================
+// CALCULATE TOPOLOGY
+// ============================================================
+void calculateTopology() {
+  cachedV = meshVertices.size();
+  cachedF = meshTriangles.size() / 3;
+  
+  // Changed to Long instead of String to avoid massive Garbage Collection spikes 
+  HashMap<Long, Boolean> edges = new HashMap<Long, Boolean>();
+  
+  for ( int i = 0; i + 2 < meshTriangles.size(); i += 3 ) {
+    int a = meshTriangles.get(i);
+    int b = meshTriangles.get(i + 1);
+    int c = meshTriangles.get(i + 2);
+    
+    addEdge( edges, a, b );
+    addEdge( edges, b, c );
+    addEdge( edges, c, a );
+  }
+  
+  cachedE = edges.size();
+  cachedEuler = cachedV - cachedE + cachedF;
+  cachedGenus = ( 2.0f - cachedEuler ) / 2.0f;
+}
+
+void addEdge( HashMap<Long, Boolean> edges, int a, int b ) {
+  long lo = min(a, b);
+  long hi = max(a, b);
+  long key = (lo << 32) | (hi & 0xFFFFFFFFL);
+  edges.put( key, true );
+}
+
+int actualV() { return cachedV; }
+int actualE() { return cachedE; }
+int actualF() { return cachedF; }
+int actualEuler() { return cachedEuler; }
+float calculatedGenus() { return cachedGenus; }
+
+int baseGenus() {
+  if ( currentShape == SHAPE_TORUS ) return 1;
+  return 0;
+}
+
+int expectedGenus() {
+  return baseGenus() + holeCount;
+}
+
+int expectedSolidEuler() {
+  return 1 - expectedGenus();
+}
+
+String shapeName() {
+  if ( currentShape == SHAPE_SPHERE ) return "SPHERE";
+  if ( currentShape == SHAPE_CYLINDER ) return "CYLINDER";
+  if ( currentShape == SHAPE_CONE ) return "CONE";
+  if ( currentShape == SHAPE_CUBOID ) return "CUBOID";
+  return "TORUS";
+}
+
+String topologyName() {
+  int g = round( calculatedGenus() );
+  if ( abs( calculatedGenus() - g ) > 0.05f ) {
+    return "Mesh topology / non-integer genus";
+  }
+  if ( g == 0 ) return "Sphere-type / genus 0";
+  if ( g == 1 ) return "Torus-type / genus 1";
+  return "Orientable genus-" + g + " surface";
+}
+
+void drawHoleAxisDiagnostics() {
+  stroke( 255, 60, 180, 180 );
+  strokeWeight(2);
+  noFill();
+  
+  for ( int h = 0; h < holeCount; h++ ) {
+    PVector d = holeDir[h];
+    PVector p1 = PVector.mult( d, -baseSize * 1.25f );
+    PVector p2 = PVector.mult( d, baseSize * 1.25f );
+    line( p1.x, p1.y, p1.z, p2.x, p2.y, p2.z );
+  }
+}
+
+// ============================================================
+// UI
+// ============================================================
+void drawUI() {
+  hint( DISABLE_DEPTH_TEST );
+  
+  fill(255);
+  textAlign( LEFT, BASELINE );
+  textSize(22);
+  text( "REGULAR STITCHED MULTI-HOLE SOLID", 30, 35 );
+  
+  fill(180);
+  textSize(13);
+  text( "Boolean solid = regular shape − cylindrical tunnels", 30, 57 );
+  
+  drawShapeButtons();
+  
+  drawSlider( sliderHoleY, "Number of holes", holeCount, 0, 8 );
+  drawSlider( sliderRadiusY, "Hole radius", holeRadius, 10, 55 );
+  drawSlider( sliderResolutionY, "Mesh resolution", gridResolution, 24, 55 );
+  
+  fill(220);
+  textSize(12);
+  text( "Holes: " + holeCount, 310, sliderHoleY + 5 );
+  text( "Radius: " + nf( holeRadius, 1, 1 ), 310, sliderRadiusY + 5 );
+  text( "Grid: " + gridResolution, 310, sliderResolutionY + 5 );
+  
+  drawToggle( 30, 250 );
+  
+  fill(170);
+  textSize(12);
+  text( "T = stitched display", 30, 286 );
+  text( "D = show tunnel axes", 30, 304 );
+  text( "R = reset rotation", 30, 322 );
+  text( "Mouse drag = rotate", 30, 340 );
+  
+  drawTopologyPanel();
+  
+  hint( ENABLE_DEPTH_TEST );
+}
+
+void drawShapeButtons() {
+  String[] names = { "1 SPHERE", "2 CYLINDER", "3 CONE", "4 CUBOID", "5 TORUS" };
+  
+  for ( int i = 0; i < 5; i++ ) {
+    float x = 30 + i * 112;
+    if ( currentShape == i ) {
+      fill( 55, 190, 245 );
+    } else {
+      fill( 35, 42, 60 );
+    }
+    
+    stroke(130);
+    strokeWeight(1);
+    rect( x, 360, 105, 34, 6 );
+    
+    fill(255);
+    textSize(11);
+    text( names[i], x + 8, 382 );
+  }
+}
+
+void drawTopologyPanel() {
+  float x = 650;
+  float y = 90;
+  float w = 550;
+  float h = 410;
+  
+  stroke( 80, 105, 135 );
+  strokeWeight(1);
+  fill( 10, 15, 27, 240 );
+  rect( x, y, w, h, 10 );
+  
+  fill(255);
+  textSize(18);
+  text( "ACTUAL MESH TOPOLOGY", x + 20, y + 30 );
+  
+  textSize(14);
+  fill(220);
+  text( "Regular solid: " + shapeName(), x + 20, y + 60 );
+  text( "Construction: BASE − TUNNELS", x + 20, y + 85 );
+  text( "Mesh: ONE shared-vertex triangle mesh", x + 20, y + 110 );
+  
+  fill( 100, 220, 255 );
+  text( "Surface: CLOSED", x + 20, y + 135 );
+  text( "Orientation: ORIENTABLE", x + 20, y + 160 );
+  
+  fill(220);
+  text( "Vertices V = " + actualV(), x + 20, y + 195 );
+  text( "Edges E = " + actualE(), x + 190, y + 195 );
+  text( "Faces F = " + actualF(), x + 360, y + 195 );
+  
+  text( "Euler characteristic:", x + 20, y + 230 );
+  text( "χ = V − E + F = " + actualEuler(), x + 20, y + 255 );
+  
+  text( "Calculated genus:", x + 20, y + 285 );
+  text( "g = (2 − χ) / 2 = " + nf( calculatedGenus(), 1, 2 ), x + 20, y + 310 );
+  
+  fill( 100, 220, 255 );
+  text( topologyName(), x + 20, y + 340 );
+  
+  fill(220);
+  text( "Base genus = " + baseGenus(), x + 20, y + 370 );
+  text( "Requested tunnels = " + holeCount, x + 210, y + 370 );
+  text( "Expected genus = " + expectedGenus(), x + 390, y + 370 );
+  text( "Solid Euler χ = 1 − g = " + expectedSolidEuler(), x + 20, y + 395 );
+}
+
+void drawToggle( float x, float y ) {
+  stroke(150);
+  strokeWeight(1);
+  fill( 25, 32, 45 );
+  rect( x, y, 250, 30, 6 );
+  
+  if ( stitchedSurface ) {
+    fill( 60, 210, 255 );
+  } else {
+    fill(100);
+  }
+  
+  noStroke();
+  ellipse( x + 16, y + 15, 17, 17 );
+  
+  fill(235);
+  textSize(13);
+  if ( stitchedSurface ) {
+    text( "STITCHED MESH: ON", x + 32, y + 20 );
+  } else {
+    text( "DIAGNOSTIC DISPLAY", x + 32, y + 20 );
+  }
+}
+
+void drawSlider( float y, String label, float value, float minValue, float maxValue ) {
+  fill(220);
+  textSize(14);
+  text( label, sliderX, y - 12 );
+  
+  stroke(90);
+  strokeWeight(5);
+  line( sliderX, y, sliderX + sliderW, y );
+  
+  float a = map( value, minValue, maxValue, 0, 1 );
+  a = constrain( a, 0, 1 );
+  float knobX = sliderX + a * sliderW;
+  
+  fill( 70, 210, 255 );
+  stroke(255);
+  strokeWeight(2);
+  ellipse( knobX, y, 16, 16 );
+}
+
+// ============================================================
+// INTERACTION
+// ============================================================
+void mousePressed() {
+  if ( mouseY >= 360 && mouseY <= 394 ) {
+    for ( int i = 0; i < 5; i++ ) {
+      float x = 30 + i * 112;
+      if ( mouseX >= x && mouseX <= x + 105 ) {
+        currentShape = i;
+        rebuildMesh();
+        return;
+      }
+    }
+  }
+  
+  if ( mouseX >= 30 && mouseX <= 280 && mouseY >= 250 && mouseY <= 280 ) {
+    stitchedSurface = !stitchedSurface;
+    return;
+  }
+  
+  if ( nearSlider( sliderHoleY ) ) {
+    dragHole = true;
+    updateHoleSlider();
+    return;
+  }
+  
+  if ( nearSlider( sliderRadiusY ) ) {
+    dragRadius = true;
+    updateRadiusSlider();
+    return;
+  }
+  
+  if ( nearSlider( sliderResolutionY ) ) {
+    dragResolution = true;
+    updateResolutionSlider();
+    return;
+  }
+  
+  rotating = true;
+  lastMouseX = mouseX;
+  lastMouseY = mouseY;
+}
+
+void mouseDragged() {
+  if ( dragHole ) {
+    updateHoleSlider();
+    return;
+  }
+  if ( dragRadius ) {
+    updateRadiusSlider();
+    return;
+  }
+  if ( dragResolution ) {
+    updateResolutionSlider();
+    return;
+  }
+  if ( rotating ) {
+    rotY += ( mouseX - lastMouseX ) * 0.01f;
+    rotX -= ( mouseY - lastMouseY ) * 0.01f;
+    lastMouseX = mouseX;
+    lastMouseY = mouseY;
+  }
+}
+
+void mouseReleased() {
+  dragHole = false;
+  dragRadius = false;
+  dragResolution = false;
+  rotating = false;
+}
+
+void keyPressed() {
+  if ( key == '1' ) { currentShape = SHAPE_SPHERE; rebuildMesh(); }
+  if ( key == '2' ) { currentShape = SHAPE_CYLINDER; rebuildMesh(); }
+  if ( key == '3' ) { currentShape = SHAPE_CONE; rebuildMesh(); }
+  if ( key == '4' ) { currentShape = SHAPE_CUBOID; rebuildMesh(); }
+  if ( key == '5' ) { currentShape = SHAPE_TORUS; rebuildMesh(); }
+  
+  if ( key == 't' || key == 'T' ) stitchedSurface = !stitchedSurface;
+  if ( key == 'd' || key == 'D' ) diagnosticMode = !diagnosticMode;
+  
+  if ( key == 'r' || key == 'R' ) {
+    rotX = -0.35f;
+    rotY = 0.55f;
+  }
+}
+
+boolean nearSlider( float y ) {
+  return mouseX >= sliderX - 15 && mouseX <= sliderX + sliderW + 15 &&
+         mouseY >= y - 15 && mouseY <= y + 15;
+}
+
+// Fixed: Only rebuild mesh if the value strictly changed to avoid lock-ups!
+void updateHoleSlider() {
+  int oldVal = holeCount;
+  float v = map( mouseX, sliderX, sliderX + sliderW, 0, 8 );
+  holeCount = constrain( round(v), 0, 8 );
+  if (oldVal != holeCount) rebuildMesh();
+}
+
+void updateRadiusSlider() {
+  float oldVal = holeRadius;
+  holeRadius = constrain( map( mouseX, sliderX, sliderX + sliderW, 10, 55 ), 10, 55 );
+  if (oldVal != holeRadius) rebuildMesh();
+}
+
+void updateResolutionSlider() {
+  int oldVal = gridResolution;
+  gridResolution = constrain( round( map( mouseX, sliderX, sliderX + sliderW, 24, 55 ) ), 24, 55 );
+  if (oldVal != gridResolution) rebuildMesh();
+}
