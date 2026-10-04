@@ -1,0 +1,4286 @@
+// ============================================================
+// RIEMANN / SOLID PORTAL UNIVERSE
+// ============================================================
+//
+// 6 SOLIDS:
+//
+// 1  Riemann Sphere
+// 2  Cylinder
+// 3  Cone
+// 4  Cube
+// 5  Torus
+// 6  RANDOM GENUS SURFACE
+//
+// RANDOM GENUS SURFACE
+// ------------------------------------------------------------
+// The new surface is:
+//
+//       deformed sphere
+//              +
+//       drilled-through tunnels
+//
+// Each tunnel increases the topological genus.
+//
+// genus = 0  -> sphere-like surface
+// genus = 1  -> one handle / one through-hole
+// genus = 2  -> two handles
+// ...
+// genus = 8  -> many handles
+//
+// NOISE controls deformation of the outer surface.
+//
+// The surface is represented numerically by an implicit field:
+//
+//       F(x,y,z) = max(SphereField,
+//                       -TunnelField)
+//
+// F = 0  -> surface
+// F < 0  -> solid
+// F > 0  -> outside / tunnel interior
+//
+// A ray becomes a PORTAL when it cannot find F=0.
+//
+// ============================================================
+
+
+// ============================================================
+// SOLID TYPES
+// ============================================================
+
+final int SPHERE       = 0;
+final int CYLINDER     = 1;
+final int CONE         = 2;
+final int CUBE         = 3;
+final int TORUS        = 4;
+final int RANDOM_GENUS = 5;
+
+int currentSolid = SPHERE;
+
+String[] solidNames = {
+  "1: Riemann Sphere",
+  "2: Cylinder",
+  "3: Cone",
+  "4: Cube",
+  "5: Torus",
+  "6: Random Genus Surface"
+};
+
+
+// ============================================================
+// CAMERA
+// ============================================================
+
+float rotX = -0.25;
+float rotY = 0.35;
+
+float lastX;
+float lastY;
+
+float R = 200;
+
+
+// ============================================================
+// UI
+// ============================================================
+
+float btnX = 20;
+float btnY = 250;
+
+float btnW = 180;
+float btnH = 44;
+
+
+// ============================================================
+// GENUS SLIDERS
+// ============================================================
+
+float noiseAmount = 0.00;
+
+// 0 = no tunnels
+// 1..8 = increasing genus
+int genusCount = 3;
+
+int genusSeed = 12345;
+
+boolean draggingNoiseSlider = false;
+boolean draggingGenusSlider = false;
+
+float sliderX = 20;
+float sliderW = 180;
+
+float noiseSliderY = 430;
+float genusSliderY = 480;
+
+
+// ============================================================
+// RANDOM TUNNELS
+// ============================================================
+
+final int MAX_HANDLES = 8;
+
+float[] handleX = new float[MAX_HANDLES];
+float[] handleZ = new float[MAX_HANDLES];
+
+
+// ============================================================
+// ANIMATION
+// ============================================================
+
+float animationPhase = 0;
+
+float animationSpeed = 0.012;
+
+boolean paused = false;
+
+float t;
+
+
+// ============================================================
+// PORTAL DOMAIN
+// ============================================================
+
+float W_LIMIT = 5.0;
+
+
+// ============================================================
+// COMPLEX GRID
+// ============================================================
+
+float gridMin = -3.0;
+float gridMax =  3.0;
+
+float gridStep = 0.50;
+
+float curveStep = 0.08;
+
+
+// ============================================================
+// FLOW
+// ============================================================
+
+float flowAmplitude = 0.22;
+
+
+// ============================================================
+// PARTICLES
+// ============================================================
+
+PortalPoint[] points;
+
+int POINT_COLS = 7;
+int POINT_ROWS = 7;
+
+
+// ============================================================
+// PORTAL MESSAGE
+// ============================================================
+
+String portalMessage = "";
+
+float portalMessageTimer = 0;
+
+
+// ============================================================
+// COLOUR PALETTE
+// ============================================================
+
+int[] particleColors;
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+
+  size(1200, 850, P3D);
+
+  smooth(8);
+
+  sphereDetail(36);
+
+  particleColors = new int[4];
+
+  particleColors[0] = color(255, 80, 180);
+  particleColors[1] = color(60, 220, 255);
+  particleColors[2] = color(255, 220, 60);
+  particleColors[3] = color(100, 255, 120);
+
+  generateGenusHandles();
+
+  createPortalPoints();
+
+  textFont(createFont("Sans", 15));
+}
+
+
+// ============================================================
+// CREATE STABLE PARTICLES
+// ============================================================
+
+void createPortalPoints() {
+
+  points =
+    new PortalPoint[
+    POINT_COLS * POINT_ROWS
+    ];
+
+  int index = 0;
+
+  for (int iy = 0; iy < POINT_ROWS; iy++) {
+
+    float v =
+      map(
+      iy,
+      0,
+      POINT_ROWS - 1,
+      gridMin,
+      gridMax
+      );
+
+    for (int ix = 0; ix < POINT_COLS; ix++) {
+
+      float u =
+        map(
+        ix,
+        0,
+        POINT_COLS - 1,
+        gridMin,
+        gridMax
+        );
+
+      points[index] =
+        new PortalPoint(
+        index + 1,
+        u,
+        v
+        );
+
+      index++;
+    }
+  }
+}
+
+
+// ============================================================
+// GENERATE RANDOM GENUS HANDLES
+// ============================================================
+//
+// All tunnels are parallel to the Y axis.
+//
+// A tunnel:
+//
+//       enters the surface
+//              |
+//              |
+//              |
+//       exits the surface
+//
+// This creates a through-hole / handle.
+//
+// The positions are randomized but deterministic because
+// genusSeed is fixed until the RANDOMIZE button is pressed.
+//
+// ============================================================
+
+void generateGenusHandles() {
+
+  randomSeed(genusSeed);
+
+  for (int i = 0; i < MAX_HANDLES; i++) {
+
+    handleX[i] = 0;
+    handleZ[i] = 0;
+  }
+
+
+  for (int i = 0; i < MAX_HANDLES; i++) {
+
+    boolean accepted = false;
+
+    for (int attempt = 0; attempt < 500; attempt++) {
+
+      float angle =
+        random(TWO_PI);
+
+      float radius =
+        random(
+        0,
+        R * 0.48
+        );
+
+      float x =
+        cos(angle) * radius;
+
+      float z =
+        sin(angle) * radius;
+
+      boolean okay = true;
+
+      // Keep tunnels separated.
+
+      for (int j = 0; j < i; j++) {
+
+        float dx =
+          x - handleX[j];
+
+        float dz =
+          z - handleZ[j];
+
+        float distance =
+          sqrt(
+          dx * dx +
+          dz * dz
+          );
+
+        if (distance < R * 0.30) {
+
+          okay = false;
+
+          break;
+        }
+      }
+
+      if (okay) {
+
+        handleX[i] = x;
+        handleZ[i] = z;
+
+        accepted = true;
+
+        break;
+      }
+    }
+
+    // Fallback deterministic arrangement.
+
+    if (!accepted) {
+
+      float angle =
+        TWO_PI *
+        i /
+        MAX_HANDLES;
+
+      float radius =
+        R * 0.38;
+
+      handleX[i] =
+        cos(angle) * radius;
+
+      handleZ[i] =
+        sin(angle) * radius;
+    }
+  }
+}
+
+
+// ============================================================
+// MAIN DRAW
+// ============================================================
+
+void draw() {
+
+  background(
+    5,
+    8,
+    18
+    );
+
+
+  // ----------------------------------------------------------
+  // CONTINUOUS TIME
+  // ----------------------------------------------------------
+
+  if (!paused) {
+
+    animationPhase += animationSpeed;
+  }
+
+  t =
+    (sin(animationPhase) + 1.0) * 0.5;
+
+
+  // ----------------------------------------------------------
+  // UPDATE PARTICLES
+  // ----------------------------------------------------------
+
+  updatePortalPoints();
+
+
+  // ----------------------------------------------------------
+  // UI
+  // ----------------------------------------------------------
+
+  drawUI();
+
+
+  // ----------------------------------------------------------
+  // 3D WORLD
+  // ----------------------------------------------------------
+
+  hint(ENABLE_DEPTH_TEST);
+
+  ambientLight(
+    45,
+    50,
+    65
+    );
+
+  directionalLight(
+    220,
+    220,
+    240,
+    0.4,
+    0.8,
+    -1
+    );
+
+  directionalLight(
+    120,
+    150,
+    190,
+    -1,
+    -0.4,
+    -0.5
+    );
+
+
+  pushMatrix();
+
+  translate(
+    width / 2 + 120,
+    height / 2 + 80,
+    -100
+    );
+
+  rotateX(rotX);
+  rotateY(rotY);
+
+
+  // ----------------------------------------------------------
+  // SOLID
+  // ----------------------------------------------------------
+
+  drawGlossySolid(
+    currentSolid
+    );
+
+
+  // ----------------------------------------------------------
+  // COMPLEX PLANE
+  // ----------------------------------------------------------
+
+  drawComplexPlane();
+
+
+  // ----------------------------------------------------------
+  // MAPPED CONFORMAL GRID
+  // ----------------------------------------------------------
+
+  drawMappedGrid();
+
+
+  // ----------------------------------------------------------
+  // PORTAL RAYS + PARTICLES
+  // ----------------------------------------------------------
+
+  drawPortalRays();
+
+
+  // ----------------------------------------------------------
+  // PARTICLE LABELS
+  // ----------------------------------------------------------
+
+  drawNumericalPoints();
+
+
+  popMatrix();
+
+
+  // ----------------------------------------------------------
+  // PORTAL EVENT MESSAGE
+  // ----------------------------------------------------------
+
+  drawPortalMessage();
+}
+
+
+// ============================================================
+// UI
+// ============================================================
+
+void drawUI() {
+
+  hint(DISABLE_DEPTH_TEST);
+
+  textAlign(
+    LEFT,
+    BASELINE
+    );
+
+  fill(255);
+
+  textSize(20);
+
+  text(
+    "RIEMANN / SOLID PORTAL UNIVERSE",
+    20,
+    30
+    );
+
+
+  // ----------------------------------------------------------
+  // SOLID LIST
+  // ----------------------------------------------------------
+
+  textSize(15);
+
+  for (int i = 0; i < solidNames.length; i++) {
+
+    if (i == currentSolid) {
+
+      fill(
+        100,
+        255,
+        120
+        );
+
+    } else {
+
+      fill(160);
+    }
+
+    text(
+      solidNames[i],
+      20,
+      60 + i * 23
+      );
+  }
+
+
+  // ----------------------------------------------------------
+  // FUNCTION
+  // ----------------------------------------------------------
+
+  fill(
+    255,
+    220,
+    80
+    );
+
+  textSize(17);
+
+  text(
+    "w(z) = (1-t)z + t z²",
+    20,
+    190
+    );
+
+
+  fill(180);
+
+  textSize(13);
+
+  text(
+    "z = u + iv",
+    20,
+    212
+    );
+
+  text(
+    "t = " + nf(t, 1, 3),
+    20,
+    230
+    );
+
+  text(
+    "|w| limit = " +
+    nf(W_LIMIT, 1, 2),
+    20,
+    248
+    );
+
+
+  // ----------------------------------------------------------
+  // NEXT SOLID BUTTON
+  // ----------------------------------------------------------
+
+  boolean hovering =
+    mouseX >= btnX &&
+    mouseX <= btnX + btnW &&
+    mouseY >= btnY &&
+    mouseY <= btnY + btnH;
+
+
+  if (hovering) {
+
+    fill(
+      100,
+      190,
+      255
+      );
+
+  } else {
+
+    fill(
+      55,
+      120,
+      210
+      );
+  }
+
+  stroke(255);
+
+  strokeWeight(1);
+
+  rect(
+    btnX,
+    btnY,
+    btnW,
+    btnH,
+    8
+    );
+
+
+  fill(255);
+
+  textAlign(
+    CENTER,
+    CENTER
+    );
+
+  textSize(15);
+
+  text(
+    "NEXT SOLID →",
+    btnX + btnW / 2,
+    btnY + btnH / 2
+    );
+
+
+  // ----------------------------------------------------------
+  // RANDOMIZE BUTTON
+  // ----------------------------------------------------------
+
+  float randomX = 20;
+  float randomY = 535;
+  float randomW = 180;
+  float randomH = 36;
+
+  boolean randomHover =
+    mouseX >= randomX &&
+    mouseX <= randomX + randomW &&
+    mouseY >= randomY &&
+    mouseY <= randomY + randomH;
+
+
+  if (randomHover) {
+
+    fill(
+      210,
+      100,
+      180
+      );
+
+  } else {
+
+    fill(
+      130,
+      65,
+      140
+      );
+  }
+
+  rect(
+    randomX,
+    randomY,
+    randomW,
+    randomH,
+    7
+    );
+
+  fill(255);
+
+  text(
+    "RANDOMIZE GENUS",
+    randomX + randomW / 2,
+    randomY + randomH / 2
+    );
+
+
+  // ----------------------------------------------------------
+  // NOISE SLIDER
+  // ----------------------------------------------------------
+
+  textAlign(
+    LEFT,
+    BASELINE
+    );
+
+  fill(220);
+
+  textSize(13);
+
+  text(
+    "Surface Noise: " +
+    nf(noiseAmount, 1, 2),
+    sliderX,
+    noiseSliderY - 15
+    );
+
+
+  drawSlider(
+    sliderX,
+    noiseSliderY,
+    sliderW,
+    map(
+      noiseAmount,
+      0,
+      0.35,
+      0,
+      1
+      )
+    );
+
+
+  // ----------------------------------------------------------
+  // GENUS SLIDER
+  // ----------------------------------------------------------
+
+  fill(220);
+
+  text(
+    "Genus / holes: " +
+    genusCount,
+    sliderX,
+    genusSliderY - 15
+    );
+
+
+  drawSlider(
+    sliderX,
+    genusSliderY,
+    sliderW,
+    map(
+      genusCount,
+      0,
+      MAX_HANDLES,
+      0,
+      1
+      )
+    );
+
+
+  // ----------------------------------------------------------
+  // STATUS
+  // ----------------------------------------------------------
+
+  fill(180);
+
+  textSize(12);
+
+  String status =
+    paused
+    ? "PAUSED"
+    : "FLOWING";
+
+  text(
+    "Animation: " + status,
+    20,
+    600
+    );
+
+  text(
+    "SPACE = pause / resume",
+    20,
+    618
+    );
+
+  text(
+    "+ / - = portal boundary",
+    20,
+    636
+    );
+
+  text(
+    "Drag = rotate",
+    20,
+    654
+    );
+
+  text(
+    "Genus surface = sphere + drilled tunnels",
+    20,
+    672
+    );
+
+
+  hint(ENABLE_DEPTH_TEST);
+}
+
+
+// ============================================================
+// DRAW SLIDER
+// ============================================================
+
+void drawSlider(
+  float x,
+  float y,
+  float w,
+  float value
+  ) {
+
+  stroke(100);
+
+  strokeWeight(4);
+
+  line(
+    x,
+    y,
+    x + w,
+    y
+    );
+
+
+  float knobX =
+    x +
+    constrain(value, 0, 1) *
+    w;
+
+
+  stroke(255);
+
+  strokeWeight(2);
+
+  fill(80, 210, 255);
+
+  ellipse(
+    knobX,
+    y,
+    15,
+    15
+    );
+}
+
+
+// ============================================================
+// COMPLEX NUMBER
+// ============================================================
+
+class Complex {
+
+  float re;
+  float im;
+
+
+  Complex(
+    float re_,
+    float im_
+    ) {
+
+    re = re_;
+    im = im_;
+  }
+
+
+  float magnitude() {
+
+    return sqrt(
+      re * re +
+      im * im
+      );
+  }
+}
+
+
+// ============================================================
+// z²
+// ============================================================
+
+Complex square(
+  Complex z
+  ) {
+
+  float re =
+    z.re * z.re -
+    z.im * z.im;
+
+  float im =
+    2.0 *
+    z.re *
+    z.im;
+
+  return new Complex(
+    re,
+    im
+    );
+}
+
+
+// ============================================================
+// FLOW
+// ============================================================
+
+Complex flowingZ(
+  Complex z
+  ) {
+
+  float dx =
+    flowAmplitude *
+    cos(animationPhase);
+
+  float dy =
+    flowAmplitude *
+    sin(animationPhase);
+
+  return new Complex(
+    z.re + dx,
+    z.im + dy
+    );
+}
+
+
+// ============================================================
+// MAIN COMPLEX FUNCTION
+// ============================================================
+
+Complex animatedFunction(
+  Complex z
+  ) {
+
+  Complex zFlow =
+    flowingZ(z);
+
+  Complex z2 =
+    square(zFlow);
+
+
+  float re =
+    lerp(
+    zFlow.re,
+    z2.re,
+    t
+    );
+
+
+  float im =
+    lerp(
+    zFlow.im,
+    z2.im,
+    t
+    );
+
+
+  return new Complex(
+    re,
+    im
+    );
+}
+
+
+// ============================================================
+// PORTAL REASONS
+// ============================================================
+
+final int REASON_NONE = 0;
+final int REASON_LIMIT = 1;
+final int REASON_SURFACE = 2;
+
+
+// ============================================================
+// PORTAL PARTICLE
+// ============================================================
+
+class PortalPoint {
+
+  int id;
+
+  float u;
+  float v;
+
+  Complex z;
+  Complex w;
+
+  PVector position;
+  PVector lastPosition;
+  PVector flashPosition;
+
+  boolean visible = false;
+  boolean previousVisible = false;
+
+  int portalReason =
+    REASON_NONE;
+
+  int portalCount = 0;
+
+  float flash = 0;
+
+  int colourIndex;
+
+
+  PortalPoint(
+    int id_,
+    float u_,
+    float v_
+    ) {
+
+    id = id_;
+
+    u = u_;
+    v = v_;
+
+    colourIndex =
+      (id - 1) % 4;
+  }
+
+
+  void update(
+    boolean emitEvent
+    ) {
+
+    previousVisible =
+      visible;
+
+
+    Complex base =
+      new Complex(
+      u,
+      v
+      );
+
+
+    z =
+      flowingZ(base);
+
+    w =
+      animatedFunctionWithoutSecondFlow(z);
+
+
+    // --------------------------------------------------------
+    // PORTAL TEST 1
+    // --------------------------------------------------------
+
+    if (
+      w.magnitude() >
+      W_LIMIT
+      ) {
+
+      visible = false;
+
+      portalReason =
+        REASON_LIMIT;
+
+      position = null;
+
+    } else {
+
+
+      // ------------------------------------------------------
+      // PORTAL TEST 2
+      // ------------------------------------------------------
+
+      PVector hit =
+        projectToSolid(
+        w.re,
+        w.im,
+        currentSolid
+        );
+
+
+      if (hit == null) {
+
+        visible = false;
+
+        portalReason =
+          REASON_SURFACE;
+
+        position = null;
+
+      } else {
+
+        visible = true;
+
+        portalReason =
+          REASON_NONE;
+
+        position = hit;
+
+        lastPosition =
+          hit.copy();
+      }
+    }
+
+
+    // --------------------------------------------------------
+    // PORTAL OUT
+    // --------------------------------------------------------
+
+    if (
+      emitEvent &&
+      previousVisible &&
+      !visible
+      ) {
+
+      portalCount++;
+
+      flash = 1.0;
+
+      if (lastPosition != null) {
+
+        flashPosition =
+          lastPosition.copy();
+      }
+
+
+      portalMessage =
+        "PORTAL OUT #" +
+        id +
+        "   " +
+        portalReasonText() +
+        "   z=" +
+        complexString(z) +
+        "   w=" +
+        complexString(w);
+
+
+      portalMessageTimer =
+        130;
+    }
+
+
+    // --------------------------------------------------------
+    // PORTAL IN
+    // --------------------------------------------------------
+
+    if (
+      emitEvent &&
+      !previousVisible &&
+      visible
+      ) {
+
+      portalCount++;
+
+      flash = 1.0;
+
+      flashPosition =
+        position.copy();
+
+
+      portalMessage =
+        "PORTAL IN #" +
+        id +
+        "   destination calculated   " +
+        "w=" +
+        complexString(w);
+
+
+      portalMessageTimer =
+        130;
+    }
+
+
+    flash *= 0.90;
+  }
+
+
+  Complex animatedFunctionWithoutSecondFlow(
+    Complex zFlow
+    ) {
+
+    Complex z2 =
+      square(zFlow);
+
+
+    float re =
+      lerp(
+      zFlow.re,
+      z2.re,
+      t
+      );
+
+
+    float im =
+      lerp(
+      zFlow.im,
+      z2.im,
+      t
+      );
+
+
+    return new Complex(
+      re,
+      im
+      );
+  }
+
+
+  String portalReasonText() {
+
+    if (
+      portalReason ==
+      REASON_LIMIT
+      ) {
+
+      return
+        "|w| > " +
+        nf(W_LIMIT, 1, 2);
+    }
+
+
+    if (
+      portalReason ==
+      REASON_SURFACE
+      ) {
+
+      return
+        "NO SURFACE INTERSECTION";
+    }
+
+
+    return "UNKNOWN";
+  }
+}
+
+
+// ============================================================
+// UPDATE PARTICLES
+// ============================================================
+
+void updatePortalPoints() {
+
+  for (
+    int i = 0;
+    i < points.length;
+    i++
+    ) {
+
+    points[i].update(true);
+  }
+}
+
+
+// ============================================================
+// COMPLEX STRING
+// ============================================================
+
+String complexString(
+  Complex c
+  ) {
+
+  String sign =
+    c.im >= 0
+    ? "+"
+    : "-";
+
+
+  return
+    "(" +
+    nf(c.re, 1, 2) +
+    sign +
+    nf(abs(c.im), 1, 2) +
+    "i)";
+}
+
+
+// ============================================================
+// COMPLEX PLANE
+// ============================================================
+
+void drawComplexPlane() {
+
+  pushMatrix();
+
+  strokeWeight(1);
+
+  noFill();
+
+
+  for (
+    float u = gridMin;
+    u <= gridMax + 0.001;
+    u += gridStep
+    ) {
+
+    stroke(
+      255,
+      220,
+      60,
+      45
+      );
+
+    boolean drawing = false;
+
+
+    for (
+      float v = gridMin;
+      v <= gridMax + 0.001;
+      v += curveStep
+      ) {
+
+      Complex z =
+        new Complex(u, v);
+
+      Complex w =
+        animatedFunction(z);
+
+      boolean valid =
+        w.magnitude() <= W_LIMIT;
+
+
+      if (valid) {
+
+        if (!drawing) {
+
+          beginShape();
+
+          drawing = true;
+        }
+
+        vertex(
+          w.re * R * 0.20,
+          -R - 6,
+          w.im * R * 0.20
+          );
+
+      } else {
+
+        if (drawing) {
+
+          endShape();
+
+          drawing = false;
+        }
+      }
+    }
+
+
+    if (drawing) {
+
+      endShape();
+    }
+  }
+
+
+  for (
+    float v = gridMin;
+    v <= gridMax + 0.001;
+    v += gridStep
+    ) {
+
+    stroke(
+      50,
+      220,
+      255,
+      45
+      );
+
+    boolean drawing = false;
+
+
+    for (
+      float u = gridMin;
+      u <= gridMax + 0.001;
+      u += curveStep
+      ) {
+
+      Complex z =
+        new Complex(u, v);
+
+      Complex w =
+        animatedFunction(z);
+
+      boolean valid =
+        w.magnitude() <= W_LIMIT;
+
+
+      if (valid) {
+
+        if (!drawing) {
+
+          beginShape();
+
+          drawing = true;
+        }
+
+        vertex(
+          w.re * R * 0.20,
+          -R - 6,
+          w.im * R * 0.20
+          );
+
+      } else {
+
+        if (drawing) {
+
+          endShape();
+
+          drawing = false;
+        }
+      }
+    }
+
+
+    if (drawing) {
+
+      endShape();
+    }
+  }
+
+
+  popMatrix();
+}
+
+
+// ============================================================
+// MAP COMPLEX POINT
+// ============================================================
+
+PVector mapComplexPoint(
+  Complex w
+  ) {
+
+  if (w == null) {
+
+    return null;
+  }
+
+
+  if (
+    w.magnitude() >
+    W_LIMIT
+    ) {
+
+    return null;
+  }
+
+
+  return projectToSolid(
+    w.re,
+    w.im,
+    currentSolid
+    );
+}
+
+
+// ============================================================
+// MAPPED GRID
+// ============================================================
+
+void drawMappedGrid() {
+
+  strokeWeight(2);
+
+  noFill();
+
+
+  for (
+    float u = gridMin;
+    u <= gridMax + 0.001;
+    u += gridStep
+    ) {
+
+    stroke(
+      255,
+      220,
+      60,
+      220
+      );
+
+    boolean drawing = false;
+
+
+    for (
+      float v = gridMin;
+      v <= gridMax + 0.001;
+      v += curveStep
+      ) {
+
+      Complex z =
+        new Complex(u, v);
+
+      Complex w =
+        animatedFunction(z);
+
+      PVector p =
+        mapComplexPoint(w);
+
+
+      if (p != null) {
+
+        if (!drawing) {
+
+          beginShape();
+
+          drawing = true;
+        }
+
+        vertex(
+          p.x,
+          p.y,
+          p.z
+          );
+
+      } else {
+
+        if (drawing) {
+
+          endShape();
+
+          drawing = false;
+        }
+      }
+    }
+
+
+    if (drawing) {
+
+      endShape();
+    }
+  }
+
+
+  for (
+    float v = gridMin;
+    v <= gridMax + 0.001;
+    v += gridStep
+    ) {
+
+    stroke(
+      50,
+      220,
+      255,
+      220
+      );
+
+    boolean drawing = false;
+
+
+    for (
+      float u = gridMin;
+      u <= gridMax + 0.001;
+      u += curveStep
+      ) {
+
+      Complex z =
+        new Complex(u, v);
+
+      Complex w =
+        animatedFunction(z);
+
+      PVector p =
+        mapComplexPoint(w);
+
+
+      if (p != null) {
+
+        if (!drawing) {
+
+          beginShape();
+
+          drawing = true;
+        }
+
+        vertex(
+          p.x,
+          p.y,
+          p.z
+          );
+
+      } else {
+
+        if (drawing) {
+
+          endShape();
+
+          drawing = false;
+        }
+      }
+    }
+
+
+    if (drawing) {
+
+      endShape();
+    }
+  }
+}
+
+
+// ============================================================
+// PORTAL RAYS + PARTICLES
+// ============================================================
+
+void drawPortalRays() {
+
+  hint(ENABLE_DEPTH_TEST);
+
+  strokeWeight(1);
+
+
+  for (
+    int i = 0;
+    i < points.length;
+    i++
+    ) {
+
+    PortalPoint pp =
+      points[i];
+
+
+    if (
+      pp.visible &&
+      pp.position != null
+      ) {
+
+      PVector source =
+        getProjectionSource(
+        currentSolid
+        );
+
+
+      stroke(
+        255,
+        255,
+        255,
+        55
+        );
+
+
+      line(
+        source.x,
+        source.y,
+        source.z,
+        pp.position.x,
+        pp.position.y,
+        pp.position.z
+        );
+
+
+      pushMatrix();
+
+      translate(
+        pp.position.x,
+        pp.position.y,
+        pp.position.z
+        );
+
+
+      noStroke();
+
+
+      int c =
+        particleColors[
+        pp.colourIndex
+        ];
+
+
+      fill(
+        c,
+        235
+        );
+
+
+      sphereDetail(10);
+
+      sphere(6);
+
+
+      noFill();
+
+      stroke(
+        c,
+        100
+        );
+
+      strokeWeight(2);
+
+      sphere(10);
+
+
+      popMatrix();
+    }
+
+
+    if (
+      pp.flash > 0.03 &&
+      pp.flashPosition != null
+      ) {
+
+      pushMatrix();
+
+      translate(
+        pp.flashPosition.x,
+        pp.flashPosition.y,
+        pp.flashPosition.z
+        );
+
+
+      noFill();
+
+      stroke(
+        255,
+        60,
+        220,
+        255 * pp.flash
+        );
+
+      strokeWeight(3);
+
+
+      sphere(
+        8 +
+        35 *
+        (1.0 - pp.flash)
+        );
+
+
+      popMatrix();
+    }
+  }
+}
+
+
+// ============================================================
+// PARTICLE LABELS
+// ============================================================
+
+void drawNumericalPoints() {
+
+  hint(DISABLE_DEPTH_TEST);
+
+  textAlign(
+    CENTER,
+    CENTER
+    );
+
+  textSize(10);
+
+
+  for (
+    int i = 0;
+    i < points.length;
+    i++
+    ) {
+
+    PortalPoint pp =
+      points[i];
+
+
+    if (
+      pp.visible &&
+      pp.position != null
+      ) {
+
+      pushMatrix();
+
+      translate(
+        pp.position.x,
+        pp.position.y - 14,
+        pp.position.z
+        );
+
+
+      fill(
+        255,
+        255,
+        255,
+        220
+        );
+
+
+      text(
+        "#" + pp.id,
+        0,
+        0
+        );
+
+
+      popMatrix();
+    }
+  }
+
+
+  hint(ENABLE_DEPTH_TEST);
+}
+
+
+// ============================================================
+// PROJECTION SOURCE
+// ============================================================
+
+PVector getProjectionSource(
+  int type
+  ) {
+
+  if (
+    type == SPHERE
+    ) {
+
+    return new PVector(
+      0,
+      R,
+      0
+      );
+  }
+
+
+  return new PVector(
+    0,
+    3.0 * R,
+    0
+    );
+}
+
+
+// ============================================================
+// PROJECT COMPLEX POINT
+// ============================================================
+
+PVector projectToSolid(
+  float u,
+  float v,
+  int type
+  ) {
+
+
+  if (
+    type == SPHERE
+    ) {
+
+    return stereographicSphere(
+      u,
+      v
+      );
+  }
+
+
+  PVector source =
+    getProjectionSource(type);
+
+
+  PVector planePoint =
+    new PVector(
+    u * R * 0.8,
+    -R,
+    v * R * 0.8
+    );
+
+
+  PVector direction =
+    PVector.sub(
+    planePoint,
+    source
+    );
+
+
+  if (
+    type == CYLINDER
+    ) {
+
+    return rayCylinder(
+      source,
+      direction
+      );
+  }
+
+
+  if (
+    type == CONE
+    ) {
+
+    return rayCone(
+      source,
+      direction
+      );
+  }
+
+
+  if (
+    type == CUBE
+    ) {
+
+    return rayCube(
+      source,
+      direction
+      );
+  }
+
+
+  if (
+    type == TORUS
+    ) {
+
+    return rayTorus(
+      source,
+      direction
+      );
+  }
+
+
+  if (
+    type == RANDOM_GENUS
+    ) {
+
+    return rayRandomGenus(
+      source,
+      direction
+      );
+  }
+
+
+  return null;
+}
+
+
+// ============================================================
+// SPHERE
+// ============================================================
+
+PVector stereographicSphere(
+  float u,
+  float v
+  ) {
+
+  float d2 =
+    u * u +
+    v * v;
+
+  float denominator =
+    d2 + 1.0;
+
+  float x =
+    2.0 *
+    R *
+    u /
+    denominator;
+
+  float y =
+    R *
+    (d2 - 1.0) /
+    denominator;
+
+  float z =
+    2.0 *
+    R *
+    v /
+    denominator;
+
+
+  return new PVector(
+    x,
+    y,
+    z
+    );
+}
+
+
+// ============================================================
+// CYLINDER
+// ============================================================
+
+PVector rayCylinder(
+  PVector O,
+  PVector D
+  ) {
+
+  float a =
+    D.x * D.x +
+    D.z * D.z;
+
+  float b =
+    2.0 *
+    (
+    O.x * D.x +
+    O.z * D.z
+    );
+
+  float c =
+    O.x * O.x +
+    O.z * O.z -
+    R * R;
+
+  float best =
+    Float.POSITIVE_INFINITY;
+
+
+  if (
+    abs(a) > 0.000001
+    ) {
+
+    float disc =
+      b * b -
+      4.0 * a * c;
+
+
+    if (
+      disc >= 0
+      ) {
+
+      float s =
+        sqrt(disc);
+
+      float t1 =
+        (-b - s) /
+        (2.0 * a);
+
+      float t2 =
+        (-b + s) /
+        (2.0 * a);
+
+
+      if (
+        validCylinderT(
+        O,
+        D,
+        t1
+        )
+        ) {
+
+        best =
+          min(best, t1);
+      }
+
+
+      if (
+        validCylinderT(
+        O,
+        D,
+        t2
+        )
+        ) {
+
+        best =
+          min(best, t2);
+      }
+    }
+  }
+
+
+  if (
+    abs(D.y) > 0.000001
+    ) {
+
+    float tb =
+      (-R - O.y) /
+      D.y;
+
+
+    if (
+      tb > 0.00001
+      ) {
+
+      float x =
+        O.x +
+        tb * D.x;
+
+      float z =
+        O.z +
+        tb * D.z;
+
+
+      if (
+        x * x +
+        z * z <=
+        R * R
+        ) {
+
+        best =
+          min(best, tb);
+      }
+    }
+
+
+    float tt =
+      (R - O.y) /
+      D.y;
+
+
+    if (
+      tt > 0.00001
+      ) {
+
+      float x =
+        O.x +
+        tt * D.x;
+
+      float z =
+        O.z +
+        tt * D.z;
+
+
+      if (
+        x * x +
+        z * z <=
+        R * R
+        ) {
+
+        best =
+          min(best, tt);
+      }
+    }
+  }
+
+
+  if (
+    best ==
+    Float.POSITIVE_INFINITY
+    ) {
+
+    return null;
+  }
+
+
+  return PVector.add(
+    O,
+    PVector.mult(D, best)
+    );
+}
+
+
+boolean validCylinderT(
+  PVector O,
+  PVector D,
+  float tt
+  ) {
+
+  if (
+    tt <= 0.00001
+    ) {
+
+    return false;
+  }
+
+
+  float y =
+    O.y +
+    tt * D.y;
+
+
+  return
+    y >= -R - 0.001 &&
+    y <= R + 0.001;
+}
+
+
+// ============================================================
+// CONE
+// ============================================================
+
+PVector rayCone(
+  PVector O,
+  PVector D
+  ) {
+
+  float k = 0.5;
+
+  float Q =
+    R - O.y;
+
+
+  float A =
+    D.x * D.x +
+    D.z * D.z -
+    k * k *
+    D.y * D.y;
+
+
+  float B =
+    2.0 *
+    (
+    O.x * D.x +
+    O.z * D.z
+    )
+    +
+    2.0 *
+    k * k *
+    Q *
+    D.y;
+
+
+  float C =
+    O.x * O.x +
+    O.z * O.z -
+    k * k *
+    Q * Q;
+
+
+  float best =
+    Float.POSITIVE_INFINITY;
+
+
+  if (
+    abs(A) < 0.000001
+    ) {
+
+    if (
+      abs(B) > 0.000001
+      ) {
+
+      float tt =
+        -C / B;
+
+
+      if (
+        validConeT(
+        O,
+        D,
+        tt
+        )
+        ) {
+
+        best = tt;
+      }
+    }
+
+  } else {
+
+    float disc =
+      B * B -
+      4.0 * A * C;
+
+
+    if (
+      disc >= 0
+      ) {
+
+      float s =
+        sqrt(disc);
+
+      float t1 =
+        (-B - s) /
+        (2.0 * A);
+
+      float t2 =
+        (-B + s) /
+        (2.0 * A);
+
+
+      if (
+        validConeT(
+        O,
+        D,
+        t1
+        )
+        ) {
+
+        best =
+          min(best, t1);
+      }
+
+
+      if (
+        validConeT(
+        O,
+        D,
+        t2
+        )
+        ) {
+
+        best =
+          min(best, t2);
+      }
+    }
+  }
+
+
+  if (
+    abs(D.y) >
+    0.000001
+    ) {
+
+    float tb =
+      (-R - O.y) /
+      D.y;
+
+
+    if (
+      tb > 0.00001
+      ) {
+
+      float x =
+        O.x +
+        tb * D.x;
+
+      float z =
+        O.z +
+        tb * D.z;
+
+
+      if (
+        x * x +
+        z * z <=
+        R * R
+        ) {
+
+        best =
+          min(best, tb);
+      }
+    }
+  }
+
+
+  if (
+    best ==
+    Float.POSITIVE_INFINITY
+    ) {
+
+    return null;
+  }
+
+
+  return PVector.add(
+    O,
+    PVector.mult(D, best)
+    );
+}
+
+
+boolean validConeT(
+  PVector O,
+  PVector D,
+  float tt
+  ) {
+
+  if (
+    tt <= 0.00001
+    ) {
+
+    return false;
+  }
+
+
+  float y =
+    O.y +
+    tt * D.y;
+
+
+  return
+    y >= -R - 0.001 &&
+    y <= R + 0.001;
+}
+
+
+// ============================================================
+// CUBE
+// ============================================================
+
+PVector rayCube(
+  PVector O,
+  PVector D
+  ) {
+
+  float tmin =
+    0.00001;
+
+  float tmax =
+    Float.POSITIVE_INFINITY;
+
+
+  float[] intervalX =
+    slab(
+    O.x,
+    D.x,
+    -R,
+    R
+    );
+
+
+  if (intervalX == null)
+    return null;
+
+
+  tmin =
+    max(tmin, intervalX[0]);
+
+  tmax =
+    min(tmax, intervalX[1]);
+
+
+  if (tmin > tmax)
+    return null;
+
+
+  float[] intervalY =
+    slab(
+    O.y,
+    D.y,
+    -R,
+    R
+    );
+
+
+  if (intervalY == null)
+    return null;
+
+
+  tmin =
+    max(tmin, intervalY[0]);
+
+  tmax =
+    min(tmax, intervalY[1]);
+
+
+  if (tmin > tmax)
+    return null;
+
+
+  float[] intervalZ =
+    slab(
+    O.z,
+    D.z,
+    -R,
+    R
+    );
+
+
+  if (intervalZ == null)
+    return null;
+
+
+  tmin =
+    max(tmin, intervalZ[0]);
+
+  tmax =
+    min(tmax, intervalZ[1]);
+
+
+  if (tmin > tmax)
+    return null;
+
+
+  float hit =
+    tmin > 0.00001
+    ? tmin
+    : tmax;
+
+
+  if (hit <= 0.00001)
+    return null;
+
+
+  return PVector.add(
+    O,
+    PVector.mult(D, hit)
+    );
+}
+
+
+float[] slab(
+  float O,
+  float D,
+  float minV,
+  float maxV
+  ) {
+
+  if (
+    abs(D) < 0.000001
+    ) {
+
+    if (
+      O < minV ||
+      O > maxV
+      ) {
+
+      return null;
+    }
+
+
+    return new float[] {
+      Float.NEGATIVE_INFINITY,
+      Float.POSITIVE_INFINITY
+    };
+  }
+
+
+  float t1 =
+    (minV - O) / D;
+
+  float t2 =
+    (maxV - O) / D;
+
+
+  if (t1 > t2) {
+
+    float temp = t1;
+
+    t1 = t2;
+
+    t2 = temp;
+  }
+
+
+  return new float[] {
+    t1,
+    t2
+  };
+}
+
+
+// ============================================================
+// TORUS
+// ============================================================
+
+PVector rayTorus(
+  PVector O,
+  PVector D
+  ) {
+
+  float major =
+    0.75 * R;
+
+  float minor =
+    0.25 * R;
+
+  int samples = 180;
+
+  float maxT = 1.6;
+
+
+  float previousT =
+    0.00001;
+
+
+  float previousF =
+    torusImplicit(
+    O,
+    D,
+    previousT,
+    major,
+    minor
+    );
+
+
+  for (
+    int i = 1;
+    i <= samples;
+    i++
+    ) {
+
+    float tt =
+      map(
+      i,
+      1,
+      samples,
+      0.00001,
+      maxT
+      );
+
+
+    float F =
+      torusImplicit(
+      O,
+      D,
+      tt,
+      major,
+      minor
+      );
+
+
+    if (
+      previousF * F <= 0
+      ) {
+
+      float lo =
+        previousT;
+
+      float hi =
+        tt;
+
+      float flo =
+        previousF;
+
+
+      for (
+        int k = 0;
+        k < 28;
+        k++
+        ) {
+
+        float mid =
+          (lo + hi) * 0.5;
+
+
+        float fm =
+          torusImplicit(
+          O,
+          D,
+          mid,
+          major,
+          minor
+          );
+
+
+        if (
+          flo * fm <= 0
+          ) {
+
+          hi = mid;
+
+        } else {
+
+          lo = mid;
+
+          flo = fm;
+        }
+      }
+
+
+      float hit =
+        (lo + hi) * 0.5;
+
+
+      return PVector.add(
+        O,
+        PVector.mult(D, hit)
+        );
+    }
+
+
+    previousT = tt;
+
+    previousF = F;
+  }
+
+
+  return null;
+}
+
+
+float torusImplicit(
+  PVector O,
+  PVector D,
+  float tt,
+  float major,
+  float minor
+  ) {
+
+  float x =
+    O.x + tt * D.x;
+
+  float y =
+    O.y + tt * D.y;
+
+  float z =
+    O.z + tt * D.z;
+
+
+  float radial =
+    sqrt(
+    x * x +
+    z * z
+    );
+
+
+  float q =
+    radial -
+    major;
+
+
+  return
+    q * q +
+    y * y -
+    minor * minor;
+}
+
+
+// ============================================================
+// RANDOM GENUS SURFACE
+// ============================================================
+//
+// IMPORTANT MATHEMATICAL IDEA
+//
+// Sphere field:
+//
+// S = x² + y² + z² - radius²
+//
+// Tunnel field:
+//
+// C = (x-hx)² + (z-hz)² - holeRadius²
+//
+// Inside tunnel:
+//
+// C < 0
+//
+// We subtract the tunnel from the sphere using:
+//
+// F = max(S, -C)
+//
+// Therefore:
+//
+// F < 0  -> solid
+// F = 0  -> surface
+// F > 0  -> outside OR tunnel
+//
+// ============================================================
+
+
+// ============================================================
+// NOISE-DEFORMED RADIUS
+// ============================================================
+
+float noisyRadius(
+  float x,
+  float y,
+  float z
+  ) {
+
+  float len =
+    sqrt(
+    x*x +
+    y*y +
+    z*z
+    );
+
+
+  if (len < 0.000001)
+    return R;
+
+
+  float nx = x / len;
+  float ny = y / len;
+  float nz = z / len;
+
+
+  // Deterministic multi-frequency directional noise.
+
+  float n1 =
+    sin(
+    3.1 * nx +
+    4.7 * ny +
+    2.9 * nz +
+    genusSeed * 0.00017
+    );
+
+
+  float n2 =
+    sin(
+    7.3 * nx -
+    5.1 * ny +
+    6.4 * nz +
+    genusSeed * 0.00031
+    );
+
+
+  float n3 =
+    sin(
+    13.0 * nx +
+    9.0 * ny -
+    11.0 * nz +
+    genusSeed * 0.00043
+    );
+
+
+  float n =
+    0.50 * n1 +
+    0.30 * n2 +
+    0.20 * n3;
+
+
+  return
+    R *
+    (
+    1.0 +
+    noiseAmount * n
+    );
+}
+
+
+// ============================================================
+// TUNNEL RADIUS
+// ============================================================
+
+float genusHoleRadius() {
+
+  return map(
+    genusCount,
+    0,
+    MAX_HANDLES,
+    0.0,
+    0.13 * R
+    );
+}
+
+
+// ============================================================
+// RANDOM GENUS IMPLICIT FIELD
+// ============================================================
+
+float randomGenusField(
+  float x,
+  float y,
+  float z
+  ) {
+
+
+  // ----------------------------------------------------------
+  // Deformed sphere
+  // ----------------------------------------------------------
+
+  float radial =
+    sqrt(
+    x*x +
+    y*y +
+    z*z
+    );
+
+
+  float boundary =
+    noisyRadius(
+    x,
+    y,
+    z
+    );
+
+
+  float sphereField =
+    radial -
+    boundary;
+
+
+  // ----------------------------------------------------------
+  // Drill tunnels through sphere
+  // ----------------------------------------------------------
+
+  float field =
+    sphereField;
+
+
+  float holeRadius =
+    genusHoleRadius();
+
+
+  for (
+    int i = 0;
+    i < genusCount;
+    i++
+    ) {
+
+    float dx =
+      x -
+      handleX[i];
+
+    float dz =
+      z -
+      handleZ[i];
+
+
+    float cylinderField =
+      sqrt(
+      dx*dx +
+      dz*dz
+      ) -
+      holeRadius;
+
+
+    // Boolean subtraction:
+    //
+    // sphere AND outside tunnel
+
+    field =
+      max(
+      field,
+      -cylinderField
+      );
+  }
+
+
+  return field;
+}
+
+
+// ============================================================
+// RANDOM GENUS RAY INTERSECTION
+// ============================================================
+//
+// We sample F along:
+//
+// P(t) = O + tD
+//
+// A sign crossing:
+//
+// F(previous) * F(current) <= 0
+//
+// means the ray crossed F=0.
+//
+// Then bisection gives a much more accurate intersection.
+//
+// ============================================================
+
+PVector rayRandomGenus(
+  PVector O,
+  PVector D
+  ) {
+
+
+  int samples = 260;
+
+  float maxT = 3.0;
+
+
+  float previousT =
+    0.00001;
+
+
+  float previousF =
+    randomGenusField(
+    O.x + previousT * D.x,
+    O.y + previousT * D.y,
+    O.z + previousT * D.z
+    );
+
+
+  for (
+    int i = 1;
+    i <= samples;
+    i++
+    ) {
+
+
+    float tt =
+      map(
+      i,
+      1,
+      samples,
+      0.00001,
+      maxT
+      );
+
+
+    float x =
+      O.x +
+      tt * D.x;
+
+    float y =
+      O.y +
+      tt * D.y;
+
+    float z =
+      O.z +
+      tt * D.z;
+
+
+    float F =
+      randomGenusField(
+      x,
+      y,
+      z
+      );
+
+
+    // --------------------------------------------------------
+    // Surface crossing
+    // --------------------------------------------------------
+
+    if (
+      previousF * F <= 0
+      ) {
+
+
+      float lo =
+        previousT;
+
+      float hi =
+        tt;
+
+      float flo =
+        previousF;
+
+
+      // ------------------------------------------------------
+      // BISECTION
+      // ------------------------------------------------------
+
+      for (
+        int k = 0;
+        k < 32;
+        k++
+        ) {
+
+
+        float mid =
+          (lo + hi) * 0.5;
+
+
+        float mx =
+          O.x +
+          mid * D.x;
+
+        float my =
+          O.y +
+          mid * D.y;
+
+        float mz =
+          O.z +
+          mid * D.z;
+
+
+        float fm =
+          randomGenusField(
+          mx,
+          my,
+          mz
+          );
+
+
+        if (
+          flo * fm <= 0
+          ) {
+
+          hi = mid;
+
+        } else {
+
+          lo = mid;
+
+          flo = fm;
+        }
+      }
+
+
+      float hit =
+        (lo + hi) * 0.5;
+
+
+      return PVector.add(
+        O,
+        PVector.mult(
+        D,
+        hit
+        )
+        );
+    }
+
+
+    previousT =
+      tt;
+
+    previousF =
+      F;
+  }
+
+
+  // No surface crossing.
+
+  return null;
+}
+
+
+// ============================================================
+// DRAW GLOSSY SOLID
+// ============================================================
+
+void drawGlossySolid(
+  int type
+  ) {
+
+  pushMatrix();
+
+
+  fill(
+    90,
+    150,
+    255,
+    45
+    );
+
+
+  specular(
+    255,
+    255,
+    255
+    );
+
+  shininess(80);
+
+  emissive(
+    5,
+    10,
+    20
+    );
+
+
+  noStroke();
+
+
+  switch(type) {
+
+
+  case SPHERE:
+
+    sphere(R);
+
+    break;
+
+
+  case CYLINDER:
+
+    drawCylinder(
+      R,
+      2 * R
+      );
+
+    break;
+
+
+  case CONE:
+
+    drawConeSolid(
+      R,
+      2 * R
+      );
+
+    break;
+
+
+  case CUBE:
+
+    box(
+      2 * R
+      );
+
+    break;
+
+
+  case TORUS:
+
+    drawTorus(
+      0.75 * R,
+      0.25 * R
+      );
+
+    break;
+
+
+  case RANDOM_GENUS:
+
+    drawRandomGenusSurface();
+
+    break;
+  }
+
+
+  popMatrix();
+}
+
+
+// ============================================================
+// RANDOM GENUS SURFACE RENDERER
+// ============================================================
+//
+// The outside shell is drawn using spherical coordinates.
+//
+// Points lying inside tunnel openings are omitted.
+//
+// Then the tunnel walls are drawn separately.
+//
+// This makes the topology visually obvious.
+//
+// ============================================================
+
+void drawRandomGenusSurface() {
+
+  int thetaSteps = 72;
+  int phiSteps = 36;
+
+
+  // ----------------------------------------------------------
+  // OUTER DEFORMED SHELL
+  // ----------------------------------------------------------
+
+  strokeWeight(1.8);
+
+  stroke(
+    80,
+    170,
+    255,
+    155
+    );
+
+
+  noFill();
+
+
+  for (
+    int i = 0;
+    i < thetaSteps;
+    i++
+    ) {
+
+    float theta =
+      TWO_PI *
+      i /
+      thetaSteps;
+
+
+    float theta2 =
+      TWO_PI *
+      (i + 1) /
+      thetaSteps;
+
+
+    beginShape(
+      QUAD_STRIP
+      );
+
+
+    for (
+      int j = 0;
+      j <= phiSteps;
+      j++
+      ) {
+
+
+      float phi =
+        PI *
+        j /
+        phiSteps;
+
+
+      float x1 =
+        sin(phi) *
+        cos(theta);
+
+      float y =
+        cos(phi);
+
+      float z1 =
+        sin(phi) *
+        sin(theta);
+
+
+      float radius1 =
+        noisyRadius(
+        x1,
+        y,
+        z1
+        );
+
+
+      float px1 =
+        radius1 * x1;
+
+      float py1 =
+        radius1 * y;
+
+      float pz1 =
+        radius1 * z1;
+
+
+      // Don't draw shell where a tunnel cuts through.
+
+      if (
+        pointInsideAnyTunnel(
+        px1,
+        pz1
+        )
+        ) {
+
+        endShape();
+
+        beginShape(
+          QUAD_STRIP
+          );
+
+        continue;
+      }
+
+
+      vertex(
+        px1,
+        py1,
+        pz1
+        );
+
+
+      float x2 =
+        sin(phi) *
+        cos(theta2);
+
+      float z2 =
+        sin(phi) *
+        sin(theta2);
+
+
+      float radius2 =
+        noisyRadius(
+        x2,
+        y,
+        z2
+        );
+
+
+      float px2 =
+        radius2 * x2;
+
+      float py2 =
+        radius2 * y;
+
+      float pz2 =
+        radius2 * z2;
+
+
+      if (
+        pointInsideAnyTunnel(
+        px2,
+        pz2
+        )
+        ) {
+
+        endShape();
+
+        beginShape(
+          QUAD_STRIP
+          );
+
+        continue;
+      }
+
+
+      vertex(
+        px2,
+        py2,
+        pz2
+        );
+    }
+
+
+    endShape();
+  }
+
+
+  // ----------------------------------------------------------
+  // TUNNEL WALLS
+  // ----------------------------------------------------------
+
+  if (genusCount > 0) {
+
+    drawGenusTunnelWalls();
+  }
+}
+
+
+// ============================================================
+// TEST TUNNEL
+// ============================================================
+
+boolean pointInsideAnyTunnel(
+  float x,
+  float z
+  ) {
+
+  float holeRadius =
+    genusHoleRadius();
+
+
+  if (holeRadius <= 0)
+    return false;
+
+
+  for (
+    int i = 0;
+    i < genusCount;
+    i++
+    ) {
+
+    float dx =
+      x -
+      handleX[i];
+
+    float dz =
+      z -
+      handleZ[i];
+
+
+    if (
+      dx*dx +
+      dz*dz <
+      holeRadius *
+      holeRadius
+      ) {
+
+      return true;
+    }
+  }
+
+
+  return false;
+}
+
+
+// ============================================================
+// DRAW TUNNEL WALLS
+// ============================================================
+
+void drawGenusTunnelWalls() {
+
+  float holeRadius =
+    genusHoleRadius();
+
+
+  int ringSteps = 32;
+  int ySteps = 18;
+
+
+  for (
+    int h = 0;
+    h < genusCount;
+    h++
+    ) {
+
+
+    float cx =
+      handleX[h];
+
+    float cz =
+      handleZ[h];
+
+
+    // approximate vertical extent
+
+    float height =
+      sqrt(
+      max(
+      1,
+      R*R -
+      cx*cx -
+      cz*cz
+      )
+      );
+
+
+    stroke(
+      255,
+      90,
+      180,
+      190
+      );
+
+    strokeWeight(2);
+
+    noFill();
+
+
+    for (
+      int j = 0;
+      j < ySteps;
+      j++
+      ) {
+
+
+      float y1 =
+        map(
+        j,
+        0,
+        ySteps,
+        -height,
+        height
+        );
+
+
+      float y2 =
+        map(
+        j + 1,
+        0,
+        ySteps,
+        -height,
+        height
+        );
+
+
+      beginShape(
+        QUAD_STRIP
+        );
+
+
+      for (
+        int i = 0;
+        i <= ringSteps;
+        i++
+        ) {
+
+
+        float a =
+          TWO_PI *
+          i /
+          ringSteps;
+
+
+        float x =
+          cx +
+          holeRadius *
+          cos(a);
+
+
+        float z =
+          cz +
+          holeRadius *
+          sin(a);
+
+
+        vertex(
+          x,
+          y1,
+          z
+          );
+
+        vertex(
+          x,
+          y2,
+          z
+          );
+      }
+
+
+      endShape();
+    }
+  }
+}
+
+
+// ============================================================
+// CYLINDER RENDERER
+// ============================================================
+
+void drawCylinder(
+  float radius,
+  float height
+  ) {
+
+  int detail = 64;
+
+
+  beginShape(
+    QUAD_STRIP
+    );
+
+
+  for (
+    int i = 0;
+    i <= detail;
+    i++
+    ) {
+
+    float a =
+      TWO_PI *
+      i /
+      detail;
+
+    float x =
+      cos(a) * radius;
+
+    float z =
+      sin(a) * radius;
+
+
+    normal(
+      cos(a),
+      0,
+      sin(a)
+      );
+
+
+    vertex(
+      x,
+      -height / 2,
+      z
+      );
+
+    vertex(
+      x,
+      height / 2,
+      z
+      );
+  }
+
+
+  endShape();
+
+
+  beginShape(
+    TRIANGLE_FAN
+    );
+
+  normal(
+    0,
+    -1,
+    0
+    );
+
+  vertex(
+    0,
+    -height / 2,
+    0
+    );
+
+
+  for (
+    int i = 0;
+    i <= detail;
+    i++
+    ) {
+
+    float a =
+      TWO_PI *
+      i /
+      detail;
+
+
+    vertex(
+      cos(a) * radius,
+      -height / 2,
+      sin(a) * radius
+      );
+  }
+
+
+  endShape();
+
+
+  beginShape(
+    TRIANGLE_FAN
+    );
+
+  normal(
+    0,
+    1,
+    0
+    );
+
+  vertex(
+    0,
+    height / 2,
+    0
+    );
+
+
+  for (
+    int i = 0;
+    i <= detail;
+    i++
+    ) {
+
+    float a =
+      TWO_PI *
+      i /
+      detail;
+
+
+    vertex(
+      cos(a) * radius,
+      height / 2,
+      sin(a) * radius
+      );
+  }
+
+
+  endShape();
+}
+
+
+// ============================================================
+// CONE RENDERER
+// ============================================================
+
+void drawConeSolid(
+  float radius,
+  float height
+  ) {
+
+  int detail = 64;
+
+
+  beginShape(
+    TRIANGLE_FAN
+    );
+
+
+  vertex(
+    0,
+    height / 2,
+    0
+    );
+
+
+  for (
+    int i = 0;
+    i <= detail;
+    i++
+    ) {
+
+    float a =
+      TWO_PI *
+      i /
+      detail;
+
+
+    float x =
+      cos(a) *
+      radius;
+
+    float z =
+      sin(a) *
+      radius;
+
+
+    float ny =
+      radius /
+      height;
+
+
+    normal(
+      cos(a),
+      ny,
+      sin(a)
+      );
+
+
+    vertex(
+      x,
+      -height / 2,
+      z
+      );
+  }
+
+
+  endShape();
+
+
+  beginShape(
+    TRIANGLE_FAN
+    );
+
+  normal(
+    0,
+    -1,
+    0
+    );
+
+  vertex(
+    0,
+    -height / 2,
+    0
+    );
+
+
+  for (
+    int i = 0;
+    i <= detail;
+    i++
+    ) {
+
+    float a =
+      TWO_PI *
+      i /
+      detail;
+
+
+    vertex(
+      cos(a) * radius,
+      -height / 2,
+      sin(a) * radius
+      );
+  }
+
+
+  endShape();
+}
+
+
+// ============================================================
+// TORUS RENDERER
+// ============================================================
+
+void drawTorus(
+  float major,
+  float minor
+  ) {
+
+  int detail1 = 64;
+  int detail2 = 32;
+
+
+  for (
+    int i = 0;
+    i < detail1;
+    i++
+    ) {
+
+    float theta1 =
+      TWO_PI *
+      i /
+      detail1;
+
+    float theta2 =
+      TWO_PI *
+      (i + 1) /
+      detail1;
+
+
+    beginShape(
+      QUAD_STRIP
+      );
+
+
+    for (
+      int j = 0;
+      j <= detail2;
+      j++
+      ) {
+
+      float phi =
+        TWO_PI *
+        j /
+        detail2;
+
+
+      float x1 =
+        (
+        major +
+        minor *
+        cos(phi)
+        ) *
+        cos(theta1);
+
+      float z1 =
+        (
+        major +
+        minor *
+        cos(phi)
+        ) *
+        sin(theta1);
+
+
+      float y =
+        minor *
+        sin(phi);
+
+
+      normal(
+        cos(phi) *
+        cos(theta1),
+        sin(phi),
+        cos(phi) *
+        sin(theta1)
+        );
+
+
+      vertex(
+        x1,
+        y,
+        z1
+        );
+
+
+      float x2 =
+        (
+        major +
+        minor *
+        cos(phi)
+        ) *
+        cos(theta2);
+
+      float z2 =
+        (
+        major +
+        minor *
+        cos(phi)
+        ) *
+        sin(theta2);
+
+
+      normal(
+        cos(phi) *
+        cos(theta2),
+        sin(phi),
+        cos(phi) *
+        sin(theta2)
+        );
+
+
+      vertex(
+        x2,
+        y,
+        z2
+        );
+    }
+
+
+    endShape();
+  }
+}
+
+
+// ============================================================
+// PORTAL MESSAGE
+// ============================================================
+
+void drawPortalMessage() {
+
+  hint(DISABLE_DEPTH_TEST);
+
+
+  if (
+    portalMessageTimer > 0
+    ) {
+
+    fill(
+      255,
+      80,
+      220,
+      min(
+      255,
+      portalMessageTimer * 3
+      )
+      );
+
+
+    textAlign(
+      LEFT,
+      BASELINE
+      );
+
+
+    textSize(13);
+
+
+    text(
+      portalMessage,
+      20,
+      height - 30
+      );
+
+
+    portalMessageTimer--;
+  }
+
+
+  hint(ENABLE_DEPTH_TEST);
+}
+
+
+// ============================================================
+// CHANGE SOLID
+// ============================================================
+
+void setSolid(
+  int newSolid
+  ) {
+
+  currentSolid =
+    newSolid;
+
+
+  for (
+    int i = 0;
+    i < points.length;
+    i++
+    ) {
+
+    points[i].visible =
+      false;
+
+    points[i].previousVisible =
+      false;
+
+    points[i].flash =
+      0;
+
+    points[i].update(false);
+
+    points[i].previousVisible =
+      points[i].visible;
+  }
+
+
+  portalMessage =
+    "SOLID → " +
+    solidNames[currentSolid];
+
+  portalMessageTimer =
+    90;
+}
+
+
+// ============================================================
+// UPDATE NOISE SLIDER
+// ============================================================
+
+void updateNoiseSlider() {
+
+  noiseAmount =
+    map(
+    mouseX,
+    sliderX,
+    sliderX + sliderW,
+    0,
+    0.35
+    );
+
+
+  noiseAmount =
+    constrain(
+    noiseAmount,
+    0,
+    0.35
+    );
+}
+
+
+// ============================================================
+// UPDATE GENUS SLIDER
+// ============================================================
+
+void updateGenusSlider() {
+
+  float value =
+    map(
+    mouseX,
+    sliderX,
+    sliderX + sliderW,
+    0,
+    MAX_HANDLES
+    );
+
+
+  int newGenus =
+    round(value);
+
+
+  newGenus =
+    constrain(
+    newGenus,
+    0,
+    MAX_HANDLES
+    );
+
+
+  if (
+    newGenus != genusCount
+    ) {
+
+    genusCount =
+      newGenus;
+  }
+}
+
+
+// ============================================================
+// KEYBOARD
+// ============================================================
+
+void keyPressed() {
+
+  if (
+    key >= '1' &&
+    key <= '6'
+    ) {
+
+    int selected =
+      key - '1';
+
+
+    setSolid(
+      selected
+      );
+  }
+
+
+  if (
+    key == ' '
+    ) {
+
+    paused =
+      !paused;
+  }
+
+
+  if (
+    key == '+'
+    ) {
+
+    W_LIMIT +=
+      0.25;
+  }
+
+
+  if (
+    key == '-'
+    ) {
+
+    W_LIMIT =
+      max(
+      1.0,
+      W_LIMIT - 0.25
+      );
+  }
+}
+
+
+// ============================================================
+// MOUSE CLICK
+// ============================================================
+
+void mousePressed() {
+
+  // ----------------------------------------------------------
+  // NEXT SOLID
+  // ----------------------------------------------------------
+
+  if (
+    mouseX >= btnX &&
+    mouseX <= btnX + btnW &&
+    mouseY >= btnY &&
+    mouseY <= btnY + btnH
+    ) {
+
+    setSolid(
+      (currentSolid + 1)
+      % solidNames.length
+      );
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // RANDOMIZE
+  // ----------------------------------------------------------
+
+  float randomX = 20;
+  float randomY = 535;
+  float randomW = 180;
+  float randomH = 36;
+
+
+  if (
+    mouseX >= randomX &&
+    mouseX <= randomX + randomW &&
+    mouseY >= randomY &&
+    mouseY <= randomY + randomH
+    ) {
+
+    genusSeed =
+      int(
+      random(
+      1,
+      1000000
+      )
+      );
+
+
+    generateGenusHandles();
+
+    portalMessage =
+      "NEW RANDOM GENUS SEED = " +
+      genusSeed;
+
+    portalMessageTimer =
+      100;
+
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // NOISE SLIDER
+  // ----------------------------------------------------------
+
+  if (
+    mouseY > noiseSliderY - 15 &&
+    mouseY < noiseSliderY + 15 &&
+    mouseX >= sliderX &&
+    mouseX <= sliderX + sliderW
+    ) {
+
+    draggingNoiseSlider = true;
+
+    updateNoiseSlider();
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // GENUS SLIDER
+  // ----------------------------------------------------------
+
+  if (
+    mouseY > genusSliderY - 15 &&
+    mouseY < genusSliderY + 15 &&
+    mouseX >= sliderX &&
+    mouseX <= sliderX + sliderW
+    ) {
+
+    draggingGenusSlider = true;
+
+    updateGenusSlider();
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // ROTATION
+  // ----------------------------------------------------------
+
+  lastX =
+    mouseX;
+
+  lastY =
+    mouseY;
+}
+
+
+// ============================================================
+// MOUSE DRAG
+// ============================================================
+
+void mouseDragged() {
+
+  if (draggingNoiseSlider) {
+
+    updateNoiseSlider();
+
+    return;
+  }
+
+
+  if (draggingGenusSlider) {
+
+    updateGenusSlider();
+
+    return;
+  }
+
+
+  rotY +=
+    (mouseX - lastX) *
+    0.01;
+
+
+  rotX -=
+    (mouseY - lastY) *
+    0.01;
+
+
+  lastX =
+    mouseX;
+
+  lastY =
+    mouseY;
+}
+
+
+// ============================================================
+// MOUSE RELEASE
+// ============================================================
+
+void mouseReleased() {
+
+  draggingNoiseSlider =
+    false;
+
+  draggingGenusSlider =
+    false;
+}
