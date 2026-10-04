@@ -1,0 +1,369 @@
+ 
+
+
+int currentSolid = 0; 
+String[] solidNames = {
+  "1: Riemann Sphere (Perfect Conformal Match)", 
+  "2: Cylinder (Sharp Caps, Broken Angles)", 
+  "3: Cone (Non-differentiable Apex)", 
+  "4: Box / Cube (Creases destroy smoothness)", 
+  "5: Torus (Projection falls off edges)"
+};
+
+float rotX = 0, rotY = 0;
+float lastX, lastY;
+float sphereRadius = 200;
+
+// Button dimensions
+float btnX = 20, btnY = 200, btnW = 140, btnH = 40;
+
+void setup() {
+  size(1000, 800, P3D);
+  smooth(8);
+  sphereDetail(60); // High-res sphere for smooth gloss
+}
+
+void draw() {
+  background(15, 15, 25);
+  
+  // ---------------------------------------------------------
+  // 2D UI Overlay (Drawn before 3D transformations)
+  // ---------------------------------------------------------
+  hint(DISABLE_DEPTH_TEST); // Ensure UI draws on top
+  
+  // Draw Text List
+  textSize(18);
+  textAlign(LEFT, BASELINE);
+  fill(255);
+  text("Select 3D Solid Mapping:", 20, 30);
+  for (int i = 0; i < solidNames.length; i++) {
+    if (i == currentSolid) fill(100, 255, 100);
+    else fill(150);
+    text(solidNames[i], 20, 60 + i * 25);
+  }
+  
+  // Draw "Next Solid" Button
+  boolean hovering = (mouseX >= btnX && mouseX <= btnX + btnW && mouseY >= btnY && mouseY <= btnY + btnH);
+  if (hovering) fill(100, 180, 255); 
+  else fill(60, 120, 200);
+  
+  stroke(255);
+  strokeWeight(1.5);
+  rect(btnX, btnY, btnW, btnH, 8); 
+  
+  fill(255);
+  textSize(16);
+  textAlign(CENTER, CENTER);
+  text("Next Solid ->", btnX + btnW / 2, btnY + btnH / 2 - 2);
+  
+  hint(ENABLE_DEPTH_TEST);
+  
+  // ---------------------------------------------------------
+  // 3D Rendering & Lighting Setup
+  // ---------------------------------------------------------
+  
+  // Enable glossy specular lighting
+  ambientLight(70, 80, 100);
+  lightSpecular(255, 255, 255); 
+  directionalLight(200, 200, 200, 0.5, 1, -1);
+  directionalLight(150, 150, 200, -1, -0.5, -0.5);
+  
+  // Center the view and apply touch/mouse rotation
+  translate(width / 2, height / 2 + 50, -100);
+  rotateX(rotX);
+  rotateY(rotY);
+  
+  // 1. Draw the clear, glossy transparent solid
+  drawGlossySolid(currentSolid);
+  
+  // 2. Draw the Equator (representing the unit circle on the complex plane)
+  pushMatrix();
+  rotateX(HALF_PI);
+  stroke(255, 50, 50, 180);
+  strokeWeight(2.5);
+  noFill();
+  ellipse(0, 0, sphereRadius * 2, sphereRadius * 2);
+  popMatrix();
+  
+  // 3. Render the North Pole (Theoretical Infinity)
+  pushMatrix();
+  translate(0, -sphereRadius, 0); 
+  fill(255, 50, 50);
+  noStroke();
+  sphere(6); 
+  popMatrix();
+  
+  // Calculate mapping interpolation (t goes from 0.0 for z to 1.0 for z^2)
+  float t = (sin(frameCount * 0.015) + 1.0) / 2.0; 
+  
+  // 4. Draw the actual 2D flat complex plane
+  drawPlaneGrid(t);
+  
+  // 5. Draw the straight rays from the North Pole to the Plane intersecting the solid
+  drawProjectionRays(t);
+  
+  // 6. Render the Stereographic Conformal Grid molded onto the chosen solid
+  drawConformalGrid(t);
+}
+
+// ---------------------------------------------------------
+// GLOSSY SOLID RENDERERS
+// ---------------------------------------------------------
+void drawGlossySolid(int type) {
+  pushMatrix();
+  
+  // Apply glass material properties
+  fill(130, 180, 255, 50); // Transparent ice-blue
+  specular(255, 255, 255); // High gloss white highlights
+  shininess(80);           // Very sharp reflections
+  emissive(10, 20, 30);    // Faint inner glow
+  noStroke();              // Hide wireframe for pure glass look
+  
+  switch(type) {
+    case 0: // SPHERE
+      sphere(sphereRadius);
+      break;
+    case 1: // CYLINDER
+      drawCylinder(sphereRadius, sphereRadius * 2);
+      break;
+    case 2: // CONE
+      drawCone(sphereRadius, sphereRadius * 2);
+      break;
+    case 3: // BOX
+      box(sphereRadius * 2);
+      break;
+    case 4: // TORUS
+      drawTorus(sphereRadius * 0.75, sphereRadius * 0.25);
+      break;
+  }
+  popMatrix();
+}
+
+void drawCylinder(float r, float h) {
+  int detail = 60;
+  // Tube
+  beginShape(QUAD_STRIP);
+  for(int i = 0; i <= detail; i++) {
+    float angle = TWO_PI / detail * i;
+    float x = sin(angle) * r;
+    float z = cos(angle) * r;
+    normal(x/r, 0, z/r); // Explicit normals for gloss
+    vertex(x, -h/2, z);
+    vertex(x, h/2, z);
+  }
+  endShape();
+  // Caps
+  beginShape(TRIANGLE_FAN);
+  normal(0, -1, 0);
+  vertex(0, -h/2, 0);
+  for(int i = 0; i <= detail; i++) vertex(sin(TWO_PI/detail*i)*r, -h/2, cos(TWO_PI/detail*i)*r);
+  endShape();
+  beginShape(TRIANGLE_FAN);
+  normal(0, 1, 0);
+  vertex(0, h/2, 0);
+  for(int i = 0; i <= detail; i++) vertex(sin(TWO_PI/detail*i)*r, h/2, cos(TWO_PI/detail*i)*r);
+  endShape();
+}
+
+void drawCone(float r, float h) {
+  int detail = 60;
+  // Outer cone shell
+  beginShape(TRIANGLE_FAN);
+  normal(0, 1, 0); 
+  vertex(0, h/2, 0); // Tip at bottom (South pole)
+  for(int i = 0; i <= detail; i++) {
+    float angle = TWO_PI / detail * i;
+    float nx = sin(angle);
+    float nz = cos(angle);
+    normal(nx, 0.5, nz); // Angled normals for smooth shading
+    vertex(nx * r, -h/2, nz * r);
+  }
+  endShape();
+  // Top Cap
+  beginShape(TRIANGLE_FAN);
+  normal(0, -1, 0);
+  vertex(0, -h/2, 0);
+  for(int i = 0; i <= detail; i++) vertex(sin(TWO_PI/detail*i)*r, -h/2, cos(TWO_PI/detail*i)*r);
+  endShape();
+}
+
+void drawTorus(float r1, float r2) {
+  int detail1 = 50; 
+  int detail2 = 50; 
+  for(int i = 0; i < detail1; i++) {
+    float theta1 = TWO_PI / detail1 * i;
+    float theta2 = TWO_PI / detail1 * (i+1);
+    beginShape(QUAD_STRIP);
+    for(int j = 0; j <= detail2; j++) {
+      float phi = TWO_PI / detail2 * j;
+      float nx = cos(phi)*cos(theta1);
+      float ny = sin(phi);
+      float nz = cos(phi)*sin(theta1);
+      normal(nx, ny, nz);
+      vertex((r1 + r2 * cos(phi)) * cos(theta1), r2 * sin(phi), (r1 + r2 * cos(phi)) * sin(theta1));
+      
+      nx = cos(phi)*cos(theta2);
+      nz = cos(phi)*sin(theta2);
+      normal(nx, ny, nz);
+      vertex((r1 + r2 * cos(phi)) * cos(theta2), r2 * sin(phi), (r1 + r2 * cos(phi)) * sin(theta2));
+    }
+    endShape();
+  }
+}
+
+// ---------------------------------------------------------
+// CORE MATHEMATICS: Ray Intersection for AutoCAD-like Solids
+// ---------------------------------------------------------
+PVector projectOntoSolid(float u, float v, int type) {
+  float d = sqrt(u * u + v * v);
+  float s = 1.0; 
+  
+  switch(type) {
+    case 0: // SPHERE
+      s = 2.0 / (d * d + 1.0);
+      break;
+    case 1: // CYLINDER
+      s = (d > 0.0001) ? min(2.0, 1.0 / d) : 2.0;
+      break;
+    case 2: // CONE
+      s = 1.0 / (d + 0.5);
+      break;
+    case 3: // BOX 
+      float sX = (abs(u) > 0.0001) ? 1.0 / abs(u) : 9999.0;
+      float sZ = (abs(v) > 0.0001) ? 1.0 / abs(v) : 9999.0;
+      s = min(2.0, min(sX, sZ)); 
+      break;
+    case 4: // TORUS
+      float r1 = 0.75; 
+      float r2 = 0.25; 
+      float A = d * d + 1.0;
+      float B = -2.0 * (r1 * d + 1.0);
+      float C = r1 * r1 + 1.0 - r2 * r2;
+      float disc = B * B - 4.0 * A * C;
+      if (disc >= 0.0) s = (-B - sqrt(disc)) / (2.0 * A); 
+      else s = 1.0; 
+      break;
+  }
+  
+  float x = s * u * sphereRadius;
+  float y = -sphereRadius + s * sphereRadius;
+  float z = s * v * sphereRadius;
+  
+  return new PVector(x, y, z);
+}
+
+void drawPlaneGrid(float t) {
+  strokeWeight(1);
+  noFill();
+  
+  float step = 0.5;
+  float curveStep = 0.05;
+  
+  for (float u = -3; u <= 3; u += step) {
+    stroke(255, 220, 50, 40); 
+    beginShape();
+    for (float v = -3; v <= 3; v += curveStep) {
+      float mappedU = lerp(u, u * u - v * v, t);
+      float mappedV = lerp(v, 2.0 * u * v, t);
+      vertex(mappedU * sphereRadius, 0, mappedV * sphereRadius);
+    }
+    endShape();
+  }
+  
+  for (float v = -3; v <= 3; v += step) {
+    stroke(50, 220, 255, 40); 
+    beginShape();
+    for (float u = -3; u <= 3; u += curveStep) {
+      float mappedU = lerp(u, u * u - v * v, t);
+      float mappedV = lerp(v, 2.0 * u * v, t);
+      vertex(mappedU * sphereRadius, 0, mappedV * sphereRadius);
+    }
+    endShape();
+  }
+}
+
+void drawProjectionRays(float t) {
+  stroke(255, 255, 255, 60); 
+  strokeWeight(1);
+  
+  PVector np = new PVector(0, -sphereRadius, 0); 
+  float rayStep = 1.0; 
+  
+  // Temporarily disable lighting so the rays and grid draw purely as emissive colors
+  noLights(); 
+  
+  for (float u = -3; u <= 3; u += rayStep) {
+    for (float v = -3; v <= 3; v += rayStep) {
+      float mappedU = lerp(u, u * u - v * v, t);
+      float mappedV = lerp(v, 2.0 * u * v, t);
+      
+      PVector planePt = new PVector(mappedU * sphereRadius, 0, mappedV * sphereRadius);
+      line(np.x, np.y, np.z, planePt.x, planePt.y, planePt.z);
+      
+      PVector solidPt = projectOntoSolid(mappedU, mappedV, currentSolid);
+      pushMatrix();
+      translate(solidPt.x, solidPt.y, solidPt.z);
+      noStroke();
+      fill(255, 200);
+      sphereDetail(10); // Low res for tiny points
+      sphere(3);
+      popMatrix();
+    }
+  }
+}
+
+void drawConformalGrid(float t) {
+  strokeWeight(2.0);
+  noFill(); 
+  
+  float step = 0.5;
+  float curveStep = 0.05;
+  
+  for (float u = -3; u <= 3; u += step) {
+    stroke(255, 220, 50, 220);
+    beginShape();
+    for (float v = -3; v <= 3; v += curveStep) {
+      float mappedU = lerp(u, u * u - v * v, t);
+      float mappedV = lerp(v, 2.0 * u * v, t);
+      PVector pt = projectOntoSolid(mappedU, mappedV, currentSolid);
+      vertex(pt.x, pt.y, pt.z);
+    }
+    endShape();
+  }
+  
+  for (float v = -3; v <= 3; v += step) {
+    stroke(50, 220, 255, 220);
+    beginShape();
+    for (float u = -3; u <= 3; u += curveStep) {
+      float mappedU = lerp(u, u * u - v * v, t);
+      float mappedV = lerp(v, 2.0 * u * v, t);
+      PVector pt = projectOntoSolid(mappedU, mappedV, currentSolid);
+      vertex(pt.x, pt.y, pt.z);
+    }
+    endShape();
+  }
+}
+
+void keyPressed() {
+  if (key >= '1' && key <= '5') {
+    currentSolid = key - '1'; 
+  }
+}
+
+void mousePressed() {
+  if (mouseX >= btnX && mouseX <= btnX + btnW && mouseY >= btnY && mouseY <= btnY + btnH) {
+    currentSolid = (currentSolid + 1) % solidNames.length; 
+  } else {
+    lastX = mouseX;
+    lastY = mouseY;
+  }
+}
+
+void mouseDragged() {
+  if (!(lastX >= btnX && lastX <= btnX + btnW && lastY >= btnY && lastY <= btnY + btnH)) {
+    rotY += (mouseX - lastX) * 0.01;
+    rotX -= (mouseY - lastY) * 0.01;
+    lastX = mouseX;
+    lastY = mouseY;
+  }
+}
